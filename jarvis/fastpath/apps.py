@@ -34,6 +34,20 @@ ALIASES = {
 SENSITIVE_APPS = ("keepass", "1password", "bitwarden", "lastpass", "regedit", "registry", "uninstall", "credential")
 
 
+def phonetic_key(text: str) -> str:
+    """Consonant skeleton for sound-alike matching (no extra dependency):
+    'integrity' -> 'ntgrt', 'antigravity' -> 'ntgrft', 'cursor' -> 'krsr'."""
+    import re as _re
+
+    t = _re.sub(r"[^a-z]", "", text.lower())
+    for a, b in (("ph", "f"), ("ck", "k"), ("qu", "kw"), ("x", "ks"), ("wh", "w"), ("th", "t"), ("sh", "s"),
+                 ("ch", "c"), ("gh", "g"), ("dg", "j")):
+        t = t.replace(a, b)
+    t = t.translate(str.maketrans("cqzvd", "kksft"))          # c/q->k, z->s, v->f, d->t (voicing-insensitive)
+    t = _re.sub(r"[aeiouyhw]", "", t)                           # vowels and soft letters carry little in ASR errors
+    return _re.sub(r"(.)\1+", r"\1", t)                         # collapse doubles
+
+
 @dataclass
 class AppEntry:
     name: str
@@ -90,7 +104,46 @@ class AppIndex:
     def refresh_async(self) -> None:
         threading.Thread(target=self.refresh, name="app-index", daemon=True).start()
 
+    def names(self, limit: int = 200) -> list[str]:
+        with self._lock:
+            return sorted({e.name for e in self.entries})[:limit]
+
     def resolve(self, spoken: str) -> tuple[AppEntry | None, float]:
+        """Text match, then sound-alike match (speech recognition mishears app names:
+        'integrity' -> Antigravity, 'ward' -> Word)."""
+        entry, conf = self._resolve_text(spoken)
+        if conf >= 0.82:
+            return entry, conf
+        p_entry, p_conf = self._resolve_phonetic(spoken)
+        if p_entry is not None and p_conf > conf:
+            return p_entry, p_conf
+        return entry, conf
+
+    def _resolve_phonetic(self, spoken: str) -> tuple[AppEntry | None, float]:
+        q = phonetic_key(ALIASES.get(spoken.lower().strip(), spoken))
+        if len(q) < 3:
+            return None, 0.0
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:
+            return None, 0.0
+        with self._lock:
+            entries = list(self.entries)
+        best, score = None, 0.0
+        for e in entries:
+            for part in [e.name] + e.name.split():
+                k = phonetic_key(part)
+                if len(k) < 3:
+                    continue
+                s = fuzz.ratio(q, k) / 100.0
+                if s > score:
+                    best, score = e, s
+        # Require a strong sound match; never resolve sensitive apps.
+        if best is None or score < 0.85 or any(x in best.name.lower() for x in SENSITIVE_APPS):
+            return None, 0.0
+        return best, round(score * 0.97, 3)
+
+    def _resolve_text(self, spoken: str) -> tuple[AppEntry | None, float]:
         """Return (entry, confidence 0..1)."""
         q = spoken.lower().strip()
         q = ALIASES.get(q, q)

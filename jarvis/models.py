@@ -25,6 +25,7 @@ class Source(str, Enum):
     VOICE = "voice"
     TYPED = "typed"
     ROUTINE = "routine"
+    SCHEDULED = "scheduled"
 
 
 class Mode(str, Enum):

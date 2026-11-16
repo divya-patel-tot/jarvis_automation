@@ -57,7 +57,7 @@ class Orchestrator:
         self.confirm = ConfirmationBroker(settings.voice.voice_confirm_tier2 or settings.autonomy == "full",
                                           settings.voice.confirm_phrase)
         self._last_blocked: list[dict] = []
-        self.scheduler = Scheduler(settings.routines, self.run_routine)
+        self.scheduler = Scheduler(settings.routines, self.run_routine, self._run_scheduled)
         self.ask_user = ask_user          # synchronous clarifying-question callback (console/voice)
         self.busy = threading.Lock()
         self._queue_lock = threading.Lock()
@@ -159,7 +159,7 @@ class Orchestrator:
         if self.confirm.pending() and self.confirm.voice(req.text, req.id):
             return TaskResult("success", "")
         if route.path == "clarify":
-            if route.intent == "reminder" and self.ask_user:
+            if route.intent in ("reminder", "schedule_task") and self.ask_user:
                 return self._clarify_reminder(route)
             return self._say(TaskResult("needs_input", route.question or "Sorry, I didn't catch that."))
         if route.path == "fast":
@@ -257,6 +257,17 @@ class Orchestrator:
                 self.scheduler.add("reminder", p["what"], due)
                 res = actions.ActionResult(True, f"Okay, I'll remind you to {p['what']} at "
                                                  f"{datetime.fromtimestamp(due).strftime('%I:%M %p').lstrip('0')}.")
+            elif i == "schedule_task":
+                due = datetime.fromisoformat(p["at"])
+                self.scheduler.add("task", p["command"], due.timestamp())
+                day = "" if due.date() == datetime.now().date() else (
+                    " tomorrow" if (due.date() - datetime.now().date()).days == 1 else due.strftime(" on %a %d %b"))
+                res = actions.ActionResult(True, f"Scheduled for {due.strftime('%I:%M %p').lstrip('0')}{day}: "
+                                                 f"{p['command']}.")
+            elif i == "list_schedule":
+                res = self._schedule_list()
+            elif i == "cancel_schedule":
+                res = self._schedule_cancel(p.get("what") or "")
             elif i == "remember":
                 self.memory.remember(p["fact"])
                 res = actions.ActionResult(True, "Got it, I'll remember that.")
@@ -348,7 +359,13 @@ class Orchestrator:
             windows = "\n".join(f"- {w['title']} ({w['process']})" for w in screen.list_windows(20))
         except Exception:
             windows = ""
-        extra = {"Recent conversation (oldest first) - use it to resolve 'it', 'that', 'there', 'again'":
+        heard = ("This request came from SPEECH RECOGNITION and may contain misheard words. Match app, person "
+                 "and file names by SOUND against the installed apps below, the recent conversation and memory "
+                 "(e.g. 'integrity' = Antigravity). Never substitute whatever app happens to be open."
+                 if req.source.value == "voice" else "")
+        extra = {"Speech note": heard,
+                 "Installed apps": ", ".join(self.apps.names(220)),
+                 "Recent conversation (oldest first) - use it to resolve 'it', 'that', 'there', 'again'":
                      self.history.as_context(8),
                  "Open windows right now": windows,
                  "Relevant memory": "\n".join(f"- {m}" for m in self.memory.relevant(req.text)),
@@ -598,6 +615,42 @@ class Orchestrator:
             self.backends.drop_session("conversation")   # never reuse a tainted session
         self.last_task = ctx
         self.current = None
+
+    # ------------------------------------------------------------------ scheduled tasks
+    def _run_scheduled(self, command: str) -> None:
+        """A job the user scheduled earlier ('send mail to X at 12 pm'): runs like a normal command,
+        through the same FIFO queue, with the user's autonomy (they already decided)."""
+        from jarvis.models import Source
+
+        bus.publish("say", text=f"Running your scheduled task: {command}")
+        self.handle(UserRequest(text=command, source=Source.SCHEDULED))
+
+    def _schedule_list(self) -> actions.ActionResult:
+        items = self.scheduler.pending()
+        if not items:
+            return actions.ActionResult(True, "Nothing is scheduled.")
+        def fmt(i):
+            when = datetime.fromtimestamp(i["due"])
+            day = "" if when.date() == datetime.now().date() else when.strftime(" %a %d %b")
+            label = {"task": "task", "reminder": "reminder", "timer": "timer"}.get(i["kind"], i["kind"])
+            return f"{when.strftime('%I:%M %p').lstrip('0')}{day} - {label}: {i['text']}"
+        lines = [fmt(i) for i in items]
+        first = lines[0].split(" - ", 1)
+        spoken = (f"You have {len(items)} scheduled. Next at {first[0]}: {first[1]}." if len(items) > 1
+                  else f"One scheduled at {first[0]}: {first[1]}.")
+        return actions.ActionResult(True, spoken, details="\n".join(lines))
+
+    def _schedule_cancel(self, what: str) -> actions.ActionResult:
+        items = self.scheduler.pending()
+        what = (what or "").lower().strip()
+        # No description ("cancel all scheduled tasks") -> everything; otherwise items mentioning it.
+        targets = [i for i in items if not what or what in i["text"].lower()]
+        for i in targets:
+            self.scheduler.cancel(i["id"])
+        if not targets:
+            return actions.ActionResult(False, "I couldn't find that scheduled item.")
+        return actions.ActionResult(True, f"Cancelled {len(targets)} scheduled item{'s' if len(targets) > 1 else ''}.",
+                                    details="\n".join(i["text"] for i in targets))
 
     # ------------------------------------------------------------------ routines
     def run_routine(self, routine: dict) -> None:

@@ -39,11 +39,11 @@ class VoiceSettings:
     wake_engine: str = "openwakeword"     # openwakeword (one-breath "hey jarvis <cmd>") | windows (legacy WinRT)
     wake_threshold: float = 0.5           # openWakeWord score 0..1 (lower = more sensitive)
     barge_in: str = "voice"               # voice: talk over Jarvis to interrupt (headset) | wake: "Hey Jarvis" only | off
-    languages: list[str] = field(default_factory=lambda: ["en", "hi"])   # Whisper may only pick these
+    languages: list[str] = field(default_factory=lambda: ["en"])   # English only (no detection pass: ~1.0 s vs 1.8 s)
     wake_confidence: str = "medium"       # low | medium | high (WinRT confidence, windows engine only)
     stt_engine: str = "whisper"           # whisper (local, reliable, Hindi) | windows (auto-falls back to whisper)
     stt_language: str = "en-US"           # Windows speech language tag (English)
-    whisper_model: str = "base"           # base ~1 s/command on CPU; "small" = better Hindi, slower
+    whisper_model: str = "base.en"        # English-only base: ~0.9 s/command, better names than "base"; "small" = 6-8 s
     tts_enabled: bool = True
     tts_voice: str = ""                   # substring of an installed SAPI voice name
     tts_rate: int = 1                     # SAPI -10..10

@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jarvis.models import RiskTier
-from jarvis.router.normalize import (AmbiguousTime, normalize, parse_clock_time, parse_duration,
-                                     words_to_number)
+from jarvis.router.normalize import (WHEN_PREFIX, WHEN_SUFFIX, AmbiguousTime, normalize, parse_clock_time,
+                                     parse_duration, split_schedule, words_to_number)
 
 CONFIDENCE_THRESHOLD = 0.82
 COMPOUND = re.compile(r"\b(and then|then|and also|and|phir|aur|uske baad|after that|also)\b")
@@ -73,6 +73,12 @@ INTENTS: list[Spec] = [
     ("remember", RiskTier.REVERSIBLE, [r"remember (that )?(?P<fact>.+)", r"yaad rakho (ki )?(?P<fact>.+)", r"(?P<fact>.+) yaad rakhna"]),
     ("forget_fact", RiskTier.REVERSIBLE, [r"forget (about |that )?(my |the )?(?P<key>.+)", r"(?P<key>.+) bhool jao"]),
     ("list_memory", RiskTier.READ_ONLY, [r"what do you (remember|know) about me", r"(show|list) (my )?memor(y|ies)", r"tumhe kya yaad hai"]),
+    ("list_schedule", RiskTier.READ_ONLY, [r"(what('?s| is) (scheduled|on my schedule|pending|planned)( for (today|later))?"
+                                            r"|(show|list|read) (me )?(my |the )?(scheduled tasks?|schedule|reminders?|timers?)"
+                                            r"|kya (kya )?scheduled hai|schedule (batao|dikhao))"]),
+    ("cancel_schedule", RiskTier.REVERSIBLE, [r"cancel (all )?(my |the )?(scheduled tasks?|schedules?|reminders?|timers?)"
+                                               r"( (for|at|about|to) (?P<what>.+))?",
+                                               r"cancel the (?P<what>.+?) (task|reminder|schedule)"]),
     ("new_topic", RiskTier.READ_ONLY, [r"(new topic|start over|new conversation|reset (the )?conversation|forget (this|the) conversation)"]),
     ("undo", RiskTier.CONSEQUENTIAL, [r"undo( (that|it|the last (one|action|task)|last))?", r"(wapas|vapas) karo", r"revert( that)?"]),
     ("help", RiskTier.READ_ONLY, [r"(help|what can you do|tum kya kar sakte ho)"]),
@@ -116,6 +122,21 @@ class Router:
             return Route("control", intent="stop", confidence=1.0, normalized=n)
         if CONFIRM_WORDS.match(n):
             return Route("control", intent="confirm", confidence=1.0, normalized=n)
+        # Any command with a time clause becomes a scheduled job ("send mail to X at 12 pm",
+        # "after 5 hours message Nilesh ..."). Reminders/timers have their own intents.
+        if not re.match(r"^(remind|set (a |an )?(timer|alarm)|timer|alarm|what|whats|cancel|show|list)\b", n):
+            try:
+                sched = split_schedule(n)
+            except AmbiguousTime as amb:
+                cmd = (WHEN_SUFFIX.match(n) or WHEN_PREFIX.match(n))
+                return Route("clarify", intent="schedule_task", normalized=n,
+                             question=f"{amb.hour}{':%02d' % amb.minute if amb.minute else ''} AM or PM?",
+                             params={"command": cmd.group("cmd") if cmd else n,
+                                     "pending_hour": amb.hour, "pending_minute": amb.minute})
+            if sched:
+                cmd, at = sched
+                return Route("fast", intent="schedule_task", tier=RiskTier.REVERSIBLE, confidence=1.0,
+                             normalized=n, params={"command": cmd, "at": at.isoformat()})
         for cand in self._candidates(n):
             for name, tier, patterns in self._compiled:
                 for pat in patterns:
@@ -224,6 +245,9 @@ class Router:
                              confidence=conf)
             r.params.update(app=entry.name, target=entry.target, kind=entry.kind)
             r.confidence = conf
+        elif name == "cancel_schedule":
+            # Without this the description was dropped and "cancel the task for mitesh" cancelled everything.
+            r.params["what"] = (g.get("what") or "").strip()
         elif name == "close_app":
             app = (g.get("app") or "").strip()
             app = re.sub(r"^(the|my)\s+", "", app)

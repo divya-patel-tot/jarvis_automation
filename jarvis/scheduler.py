@@ -24,8 +24,12 @@ DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 class Scheduler:
+    MISSED_RUN_WINDOW_S = 30 * 60      # a scheduled TASK missed while Jarvis was off runs only if < 30 min late
+
     def __init__(self, routines: list[dict] | None = None,
-                 run_routine: Callable[[dict], None] | None = None) -> None:
+                 run_routine: Callable[[dict], None] | None = None,
+                 run_task: Callable[[str], None] | None = None) -> None:
+        self.run_task = run_task
         self.path = paths.state_dir() / "reminders.json"
         self.items: list[dict] = self._load()
         self.routines = routines or []
@@ -80,6 +84,19 @@ class Scheduler:
         with self._lock:
             self.items = [i for i in self.items if i["id"] != item["id"]]
             self._save()
+        if item["kind"] == "task":
+            late = time.time() - item["due"]
+            if missed and late > self.MISSED_RUN_WINDOW_S:
+                msg = f"I was off when this was scheduled, so I did not run it: {item['text']}"
+                bus.publish("say", text=msg)
+                bus.publish("notify", title="Jarvis - missed scheduled task", text=msg)
+                return
+            log.info("running scheduled task: %s", item["text"])
+            bus.publish("notify", title="Jarvis - scheduled task", text=item["text"])
+            if self.run_task is not None:
+                threading.Thread(target=self.run_task, args=(item["text"],), name="scheduled-task",
+                                 daemon=True).start()
+            return
         if item["kind"] == "timer":
             msg = "Your timer is done." if not missed else "A timer finished while I was off."
         else:

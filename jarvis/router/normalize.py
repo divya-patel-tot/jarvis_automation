@@ -62,7 +62,8 @@ def words_to_number(text: str) -> int | None:
 
 UNIT_SECONDS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "second s": 1, "m": 60, "min": 60,
                 "mins": 60, "minute": 60, "minutes": 60, "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600,
-                "hours": 3600, "ghanta": 3600, "ghante": 3600, "minat": 60}
+                "hours": 3600, "ghanta": 3600, "ghante": 3600, "minat": 60, "day": 86400, "days": 86400,
+                "din": 86400}
 NUM_WORD = r"(\d+|" + "|".join(sorted(set(EN_NUM) | set(HI_NUM), key=len, reverse=True)) + r")"
 
 
@@ -72,13 +73,56 @@ def parse_duration(text: str) -> int | None:
     if re.search(r"\bhalf an? hour\b|\baadha ghanta\b", t):
         return 1800
     total, found = 0, False
-    for num, unit in re.findall(r"\b" + NUM_WORD + r"\s*(seconds?|secs?|minutes?|mins?|minat|hours?|hrs?|ghante|ghanta|s|m|h)\b", t):
+    for num, unit in re.findall(r"\b" + NUM_WORD + r"\s*(seconds?|secs?|minutes?|mins?|minat|hours?|hrs?|ghante|ghanta|days?|din|s|m|h)\b", t):
         n = words_to_number(num)
         if n is None:
             continue
         total += n * UNIT_SECONDS.get(unit, 60)
         found = True
     return total if found and total > 0 else None
+
+
+_UNITS = r"(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|ghante|ghanta|minat|din)"
+_CLOCK = r"\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?"
+WHEN_SUFFIX = re.compile(
+    rf"^(?P<cmd>.+?)[\s,]+(?P<when>(?:at|by)\s+{_CLOCK}(?:\s+(?:today|tomorrow|tonight))?"
+    rf"|(?:in|after)\s+(?:an?\s+|\w+\s+){{0,3}}?{_UNITS}(?:\s+(?:from now|later))?"
+    rf"|tomorrow(?:\s+(?:morning|evening|at\s+{_CLOCK}))?"
+    rf"|(?:kal\s+|aaj\s+)?(?:subah|shaam|sham|raat|dopahar)?\s*\d{{1,2}}\s*baje"
+    rf"|\w+\s+{_UNITS}\s+(?:baad|me|mein))$", re.I)
+WHEN_PREFIX = re.compile(
+    rf"^(?P<when>(?:at|by)\s+{_CLOCK}(?:\s+(?:today|tomorrow|tonight))?"
+    rf"|(?:in|after)\s+(?:an?\s+|\w+\s+){{0,3}}?{_UNITS}"
+    rf"|tomorrow(?:\s+(?:morning|evening|at\s+{_CLOCK}))?"
+    rf"|(?:kal\s+|aaj\s+)?(?:subah|shaam|sham|raat|dopahar)?\s*\d{{1,2}}\s*baje"
+    rf"|\w+\s+{_UNITS}\s+(?:baad|me|mein))[\s,]+(?P<cmd>.+)$", re.I)
+
+
+def split_schedule(text: str, now: datetime | None = None) -> tuple[str, datetime] | None:
+    """'send mail to X at 12 pm' -> ('send mail to X', today/tomorrow 12:00).
+    Raises AmbiguousTime for 'at 5'. Returns None if there is no time clause."""
+    now = now or datetime.now()
+    t = text.strip().rstrip(".")
+    for rx in (WHEN_SUFFIX, WHEN_PREFIX):
+        m = rx.match(t)
+        if not m:
+            continue
+        cmd, when = m.group("cmd").strip(" ,"), m.group("when").strip()
+        if len(cmd.split()) < 2:
+            continue
+        wl = when.lower()
+        if re.match(r"^(in|after)\b", wl) or re.search(r"\b(baad|me|mein)$", wl):
+            secs = parse_duration(wl)
+            if secs:
+                return cmd, now + timedelta(seconds=secs)
+            continue
+        if wl.startswith("tomorrow") and not re.search(r"\d", wl):
+            hour = 18 if "evening" in wl else 9
+            return cmd, (now + timedelta(days=1)).replace(hour=hour, minute=0, second=0, microsecond=0)
+        at = parse_clock_time(wl if re.search(r"\b(at|baje)\b", wl) else "at " + wl, now)
+        if at is not None:
+            return cmd, at
+    return None
 
 
 class AmbiguousTime(Exception):
