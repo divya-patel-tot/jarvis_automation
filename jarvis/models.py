@@ -115,6 +115,7 @@ class TaskResult:
     double_check: list[str] = field(default_factory=list)
     question: str = ""               # set when the agent needs clarification
     injection_warning: str = ""
+    verified: bool | None = None     # agent's claim that it checked the real effect (None = not stated)
 
 
 @dataclass

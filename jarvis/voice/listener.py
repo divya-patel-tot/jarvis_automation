@@ -47,6 +47,8 @@ class AudioListener:
     SILENT_REOPEN_S = 15.0      # this long without any sound -> reopen (dead-stream safety net)
     _last_frame = 0.0
     _last_loud = 0.0
+    _barge_run = 0.0
+    barge_in = "voice"          # voice (just talk over Jarvis - headset) | wake (say "Hey Jarvis") | off
 
     def __init__(self, on_utterance: Callable[[str, float], None], whisper: WhisperStt,
                  wake_threshold: float = 0.5, follow_up_s: float = 6.0, max_utterance_s: float = 15.0,
@@ -184,10 +186,25 @@ class AudioListener:
                     log.warning("mic stream stalled (no audio for %.0fs) - reopening", self.STALL_S)
                     return
                 continue
-            if self.paused.is_set() or _speaking():
-                self._drain()                      # never listen to ourselves
+            if self.paused.is_set():
+                self._drain()
                 continue
             now = time.monotonic()
+            if _speaking():
+                # Barge-in: keep listening while Jarvis talks; the user can cut in (like ElevenLabs agents).
+                self._ring.append(frame)
+                self._last_loud = now
+                if self.barge_in == "off":
+                    continue
+                score = float(self._oww.predict(frame).get("hey_jarvis", 0.0))
+                rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+                loud = rms > max(self._threshold() * 2.5, 0.015)
+                self._barge_run = self._barge_run + FRAME_S if loud else 0.0
+                if score >= self.wake_threshold or (self.barge_in == "voice" and self._barge_run >= 0.35):
+                    log.info("barge-in while speaking (wake %.2f, voice %.2fs)", score, self._barge_run)
+                    self._barge_run = 0.0
+                    self._capture(preroll=True, reason="barge-in", require_new_speech=False)
+                continue
             if self._followup_pending:
                 self._followup_pending = False
                 self._followup_until = now + self.follow_up_s

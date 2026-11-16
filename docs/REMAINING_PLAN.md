@@ -140,7 +140,7 @@ licensing. It is a single-user personal desktop app. Do not add any of these.
 5. Optional: `whisper_model="small"` toggle in Settings for better Hindi (slower).
 **Accept:** 18/20 spoken commands correct; "confirm" works for a delete; no self-hearing loops.
 
-## Phase 3 — GUI hands: own MCP server (UI Automation) · 2–3 days
+## Phase 3 — GUI hands · core DONE as in-process SDK custom tools (`jarvis/desktop/tools.py`, D-016). Remaining: vision click fallback, per-app golden tests (Teams/WhatsApp/Outlook web), desktop lock UI indicator
 **Approach:** `jarvis/mcp_server/server.py` using `mcp` (FastMCP, stdio). Tools: `list_windows`,
 `focus_window(title|pid)`, `dump_ui_tree(depth≤6)`, `find_element(name/role/automation_id)`, `click_element`,
 `type_text`, `send_hotkey`, `wait_for_element`, `screenshot_window`, `vision_click(x,y)`.

@@ -103,7 +103,8 @@ class SdkBackend(AgentBackend):
             agent = Agent.create(
                 client=mb.client, api_key=self._api_key_getter(), model=spec.model or "default",
                 name=f"jarvis-{spec.session_key or 'oneshot'}",
-                local=LocalAgentOptions(cwd=str(spec.cwd), setting_sources=self.setting_sources),
+                local=LocalAgentOptions(cwd=str(spec.cwd), setting_sources=self.setting_sources,
+                                        custom_tools=spec.custom_tools or None),
             )
             if spec.session_key:
                 self._agents[spec.session_key] = (agent, spec.model, time.time())

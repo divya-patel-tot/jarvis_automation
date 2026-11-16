@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime
@@ -115,6 +116,7 @@ class Orchestrator:
     def kill_switch(self) -> None:
         """Cancel everything within ~1 s: approvals, agent run, process tree, speech."""
         t0 = time.perf_counter()
+        self._pending_amend = ""                       # a kill is a kill, not an amendment
         self._cancel_queue.set()                       # drop queued tasks too
         threading.Timer(1.0, self._cancel_queue.clear).start()
         self.confirm.cancel_all()
@@ -162,6 +164,14 @@ class Orchestrator:
             return self._say(TaskResult("needs_input", route.question or "Sorry, I didn't catch that."))
         if route.path == "fast":
             return self._say(self._fast(route, req))
+        # Mid-task correction ("actually send it to Mitesh", "also add the deadline", "wait, use Teams"):
+        # interrupt the running task and continue it with the change instead of queueing a new task.
+        if self.busy.locked() and self.current is not None and self.AMEND.search(route.normalized or req.text):
+            self._pending_amend = req.text
+            self.audit.write("task_amended", self.current.task_id, text=req.text)
+            bus.publish("say", text="Got it, updating the current task.")
+            self.backends.cancel()
+            return TaskResult("success", "", "Applied to the running task.")
         # Agent tasks: FIFO queue (fast-path commands above never wait). Duplicates are merged.
         key = route.normalized or req.text.lower().strip()
         with self._queue_lock:
@@ -462,13 +472,16 @@ class Orchestrator:
         tampered = self.ws.verify_integrity()
         if tampered:
             self.audit.write("integrity_restored", ctx.task_id, files=tampered)
-        pctx = self.ws.policy_context(ctx, mode, autonomy=autonomy)
+        tools = self._desktop_tools() if mode != Mode.PLAN else None
+        pctx = self.ws.policy_context(ctx, mode, autonomy=autonomy,
+                                      allowed_mcp_tools=list(tools) if tools else None)
         self._last_blocked = []
+        self._current_folder = ctx.folder
         self.ws.write_policy_state(pctx)
         self._write_state(ctx, "running", mode.value)
         phase = mode.value
         spec = RunSpec(prompt=prompt, cwd=self.ws.root, mode="plan" if mode == Mode.PLAN else "agent",
-                       model=self.backends.model_for(strong), session_key=session)
+                       model=self.backends.model_for(strong), session_key=session, custom_tools=tools)
         obs = Observer(ctx.task_id, self.audit, self.s.budgets, pctx, self.backends.cancel, self.backends.kill, phase)
 
         def on_event(ev):
@@ -486,6 +499,15 @@ class Orchestrator:
             # (e.g. someone opening the workspace in Cursor later): lock back to plan mode.
             self.ws.write_policy_state(self.ws.policy_context(ctx, Mode.PLAN, autonomy="safe"))
         self._last_blocked = list(obs.blocked)
+        amend, self._pending_amend = self._pending_amend, ""
+        if amend and outcome.status in ("cancelled", "error") and self._amend_depth < 3:
+            # Continue the SAME task with the user's interruption (same session keeps what was done).
+            self._amend_depth += 1
+            try:
+                return self._run_phase(ctx, mode, prompts.amend_prompt(prompt, amend), session, strong,
+                                       outcome_box, autonomy)
+            finally:
+                self._amend_depth -= 1
         self.ledger.record(runs=1, tokens=int(outcome.usage.get("total_tokens", 0) or
                                               outcome.usage.get("input_tokens", 0) + outcome.usage.get("output_tokens", 0)),
                            tool_calls=outcome.tool_calls, seconds=outcome.duration_s)
@@ -508,6 +530,7 @@ class Orchestrator:
                 return TaskResult("failed", self._backend_msg("rate_limit"), outcome.error)
             return TaskResult("failed", "The agent ran into an error.", outcome.error or outcome.text[-2000:])
         result = parse_result(outcome.text)
+        result = self._enforce_truth(ctx, result)
         if obs.blocked and result.status == "success":
             result.double_check.append("Some actions were blocked by policy: "
                                        + "; ".join(sorted({str(b.get('reason')) for b in obs.blocked}))[:500])
@@ -520,6 +543,48 @@ class Orchestrator:
                 return self._run_phase(ctx, mode, prompts.clarification_prompt(result.question, ans),
                                        session or "", strong)
         return result
+
+    def _desktop_tools(self) -> dict | None:
+        """Generic UI Automation tools for any app/browser tab (built once; SDK backend only)."""
+        if not self.s.desktop_control_enabled or getattr(self.backends.active, "name", "") != "sdk":
+            return None
+        if self._tools is None:
+            try:
+                from jarvis.desktop.tools import Desktop, build_custom_tools
+
+                self._tools = build_custom_tools(Desktop(lambda: getattr(self, "_current_folder", self.ws.outputs)))
+            except Exception:
+                log.exception("desktop tools unavailable")
+                self._tools = {}
+        return self._tools or None
+
+    _tools: dict | None = None
+    _pending_amend = ""
+    _amend_depth = 0
+    AMEND = re.compile(r"^(actually|wait|no,?|instead|also|and also|plus|oh and|change|make it|rather|correction|"
+                       r"not |dont|do not|use |send it to|add |remove |skip|haan aur|aur|nahi|balki)|\binstead\b",
+                       re.I)
+
+    SEND_WORDS = re.compile(r"\b(send|sent|message|msg|mail|email|e-mail|reply|post|submit|share|whatsapp|teams|"
+                            r"bhejo|bhej)\b", re.I)
+    DOUBT_WORDS = re.compile(r"\b(may|might|not sure|couldn'?t (confirm|verify|find)|unverified|tried to|"
+                             r"please (check|confirm)|could not (confirm|verify)|not by name)\b", re.I)
+
+    def _enforce_truth(self, ctx: TaskContext, r: TaskResult) -> TaskResult:
+        """Jarvis must never claim success it can't back up (live log: 'I sent the email' after blind
+        Ctrl+Enter; 'tried to send' to Teams while the window showed 'New Message')."""
+        if r.status != "success":
+            return r
+        doubtful = bool(self.DOUBT_WORDS.search(f"{r.spoken} {r.details} {' '.join(r.double_check)}"))
+        is_send = bool(self.SEND_WORDS.search(ctx.request.text))
+        if r.verified is False or doubtful or (is_send and r.verified is not True):
+            r.status = "unverified"
+            spoken = r.spoken.rstrip(". ")
+            if not re.search(r"\b(couldn'?t|could not|not sure|unverified|please check)\b", spoken, re.I):
+                spoken = f"{spoken}. But I couldn't confirm it worked, please check"
+            r.spoken = spoken + "."
+            self.audit.write("unverified_result", ctx.task_id, spoken=r.spoken)
+        return r
 
     def _write_state(self, ctx: TaskContext, status: str, phase: str) -> None:
         (ctx.folder / "state.json").write_text(json.dumps({"status": status, "phase": phase}), encoding="utf-8")

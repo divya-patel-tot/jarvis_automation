@@ -151,6 +151,10 @@ def run(voice: bool) -> int:
     orch.start()
 
     def handle_async(text: str, source: Source, conf: float = 1.0) -> None:
+        if waiting_question.is_set():          # a spoken answer to Jarvis's question ("Send it to X?")
+            answers.append(text)
+            answer_ready.set()
+            return
         heard = getattr(listener, "last_language", "") if source == Source.VOICE else ""
         lang = heard or ("hi" if any(w in f" {text.lower()} " for w in (" karo", " kholo", " batao", " kya ", " hai "))
                          else "en")
@@ -175,6 +179,7 @@ def run(voice: bool) -> int:
             listener = AudioListener(lambda t, c: handle_async(t, Source.VOICE, c), whisper,
                                      wake_threshold=s.voice.wake_threshold, follow_up_s=s.voice.follow_up_window_s,
                                      max_utterance_s=s.voice.max_utterance_s)
+            listener.barge_in = s.voice.barge_in
             listener.start()
             _print("Voice: say 'Hey Jarvis' + your request in one go (or press Ctrl+Alt+Space).")
         except Exception as exc:

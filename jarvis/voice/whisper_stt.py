@@ -35,7 +35,9 @@ WAKE_PREFIX = re.compile(
     r"(?:jarvis|jervis|javis|jarvas|jarves|jarvi|travis|service|jarvish|charvis|garvis)\b\W*", re.I)
 
 
-WAKE_WORD = re.compile(r"\b(jarvis|jervis|javis|jarvas|jarves|jarvish|charvis|garvis)\b[\s,.!?:]*", re.I)
+# Live mishearings of "Hey Jarvis": "Hage-ervis", "page service", "Edge service", "Service", "Niles"...
+WAKE_WORD = re.compile(r"(\b|-)(jarvis|jervis|javis|jarvas|jarves|jarvish|charvis|garvis|harvis|ervis|service|"
+                       r"servis)\b[\s,.!?:]*", re.I)
 
 
 def strip_wake(text: str) -> str:

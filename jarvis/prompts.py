@@ -99,6 +99,17 @@ def delete_prompt(ctx: TaskContext, items: str) -> str:
     ])
 
 
+def amend_prompt(original_prompt: str, amendment: str) -> str:
+    """The user interrupted a running task with a change - continue the SAME task, don't start over."""
+    return "\n\n".join([
+        original_prompt,
+        f'USER INTERRUPTION (newest instruction - it overrides anything above that conflicts): "{amendment}"',
+        "You were stopped mid-task to apply this. Some steps may already be done: check the current state "
+        "(open windows, files, drafts) instead of redoing them, apply the change, finish the task, verify, and "
+        "finish with the jarvis-result block.",
+    ])
+
+
 def clarification_prompt(question: str, answer: str) -> str:
     return (f'You asked the user: "{question}". The user answered: "{answer}". '
             "Continue the same task in the same mode with this answer. Finish with the jarvis-result block.")

@@ -40,6 +40,7 @@ def parse_result(text: str) -> TaskResult:
                 double_check=[str(x) for x in (d.get("double_check") or [])][:50],
                 question=str(d.get("question") or ""),
                 injection_warning=str(d.get("injection_warning") or ""),
+                verified=d["verified"] if isinstance(d.get("verified"), bool) else None,
             )
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass

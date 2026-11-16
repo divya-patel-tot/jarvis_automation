@@ -85,6 +85,7 @@ def test_queue_fifo_and_duplicates(monkeypatch):
     fake = _FakeOrch()
     o.__dict__.update(fake.__dict__)
     o._tl = threading.local()
+    o.current = None
     o.router = Router(app_index=_Apps())
     o.confirm = type("C", (), {"pending": lambda self: [], "voice": lambda self, *a: False})()
     o.audit = type("A", (), {"write": lambda self, *a, **k: None})()

@@ -21,12 +21,14 @@ class BudgetSettings:
     task_wall_clock_s: int = 300          # total per task
     first_event_timeout_s: int = 60       # agent stuck starting
     idle_timeout_s: int = 90              # no events between
-    max_tool_calls: int = 40
+    max_tool_calls: int = 80              # GUI tasks (read -> click -> type -> verify) need more steps
     max_events: int = 4000
     max_screenshots: int = 3
     max_files_created: int = 50
-    daily_agent_runs: int = 200
-    daily_tokens: int = 3_000_000
+    # Runaway guard only (your Cursor plan is the real limit). Agent runs average ~65k tokens, mostly cached
+    # context re-reads, so 3M/day was exhausted after ~49 tasks in one morning of testing.
+    daily_agent_runs: int = 500
+    daily_tokens: int = 20_000_000
     warn_fraction: float = 0.8
 
 
@@ -36,6 +38,7 @@ class VoiceSettings:
     wake_phrases: list[str] = field(default_factory=lambda: ["hey jarvis", "ok jarvis", "jarvis"])
     wake_engine: str = "openwakeword"     # openwakeword (one-breath "hey jarvis <cmd>") | windows (legacy WinRT)
     wake_threshold: float = 0.5           # openWakeWord score 0..1 (lower = more sensitive)
+    barge_in: str = "voice"               # voice: talk over Jarvis to interrupt (headset) | wake: "Hey Jarvis" only | off
     languages: list[str] = field(default_factory=lambda: ["en", "hi"])   # Whisper may only pick these
     wake_confidence: str = "medium"       # low | medium | high (WinRT confidence, windows engine only)
     stt_engine: str = "whisper"           # whisper (local, reliable, Hindi) | windows (auto-falls back to whisper)
@@ -74,7 +77,7 @@ class Settings:
     autonomy: str = "full"
     plan_first_tier: int = 1              # safe mode only: tiers >= this run plan-then-execute
     allow_install_software: bool = False  # unlocked in settings only
-    desktop_control_enabled: bool = False # MCP UIA tools
+    desktop_control_enabled: bool = True  # generic UI Automation tools for any app/browser tab
     vision_enabled: bool = False
     web_allowlist: list[str] = field(default_factory=lambda: [
         "wikipedia.org", "learn.microsoft.com", "docs.python.org", "github.com", "stackoverflow.com"])

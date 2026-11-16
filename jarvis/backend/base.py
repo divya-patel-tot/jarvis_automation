@@ -29,6 +29,7 @@ class RunSpec:
     model: str = "default"
     session_key: str = ""              # "" -> fresh one-shot session
     mcp_servers: dict = field(default_factory=dict)
+    custom_tools: dict | None = None   # in-process tools (SDK only), e.g. desktop UI Automation
     extra_env: dict[str, str] = field(default_factory=dict)
 
 

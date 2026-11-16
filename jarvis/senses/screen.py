@@ -147,16 +147,21 @@ def uia_text(hwnd: int, max_chars: int = 60_000, max_depth: int = 25, time_budge
         for ctrl, depth in auto.WalkControl(root, includeTop=True, maxDepth=max_depth):
             if time.monotonic() > deadline or total > max_chars:
                 break
+            parts = []
             try:
-                parts = [ctrl.Name or ""]
-                vp = ctrl.GetPattern(auto.PatternId.ValuePattern) if ctrl.IsValuePatternAvailable() else None
-                if vp is not None:
-                    parts.append(vp.Value or "")
-                tp = ctrl.GetPattern(auto.PatternId.TextPattern) if ctrl.IsTextPatternAvailable() else None
-                if tp is not None:
-                    parts.append(tp.DocumentRange.GetText(max_chars - total) or "")
+                parts.append(ctrl.Name or "")
             except Exception:
-                continue
+                pass
+            # uiautomation 2.x: GetPattern(PatternId.X) returns None when unsupported (no Is*Available()).
+            for pid in ("ValuePattern", "TextPattern"):
+                try:
+                    p = ctrl.GetPattern(getattr(auto.PatternId, pid))
+                    if p is None:
+                        continue
+                    parts.append((p.Value if pid == "ValuePattern" else
+                                  p.DocumentRange.GetText(max(1, max_chars - total))) or "")
+                except Exception:
+                    continue
             for p in parts:
                 p = p.strip()
                 if p and p not in seen and len(p) > 1:
