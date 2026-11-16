@@ -1,11 +1,12 @@
-"""Colours and stylesheet for the overlay and dialogs. Dark glass, one accent."""
+"""Colours and stylesheet for the overlay and dialogs. Frosted glass panel, solid controls."""
 
 from __future__ import annotations
 
 ACCENT = "#8EB6FF"
-TEXT = "#F4F5F8"
-MUTED = "#9AA0AE"
-GLASS = (20, 20, 24, 230)  # #141418 at ~90%
+TEXT = "#FFFFFF"
+MUTED = "#D5D8E4"
+GLASS = (22, 22, 30, 176)
+CORNER = 12
 
 STATE_COLOR = {
     "idle": "#8EB6FF",
@@ -19,52 +20,60 @@ STATE_COLOR = {
 }
 
 OVERLAY_QSS = """
-QLabel { color: #F4F5F8; background: transparent; }
-QLabel#muted, QLabel#detail { color: #9AA0AE; }
-QLabel#you { color: #C9D4EE; }
-QLabel#badgeOk { color: #7DDEAA; font-weight: 600; }
-QLabel#badgeWarn { color: #E7C37A; font-weight: 600; }
+QWidget#overlay, QWidget#body { background: transparent; color: #FFFFFF; border: none; }
+QLabel { color: #FFFFFF; background: transparent; }
+QLabel#hint { color: #FFFFFF; font-size: 13px; font-weight: 600; }
+QLabel#muted, QLabel#detail { color: #D5D8E4; }
+QLabel#you { color: #FFFFFF; font-weight: 600; }
+QLabel#notice {
+    background: #2C3348;
+    color: #FFFFFF;
+    border: 1px solid #8EB6FF;
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+QLabel#badgeOk { color: #8DFFC0; font-weight: 700; }
+QLabel#badgeWarn { color: #FFD56A; font-weight: 700; }
 QWidget#card {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 12px;
+    background: #23232E;
+    border: 1px solid #4A5168;
+    border-radius: 10px;
 }
 QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }
 QLineEdit {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: #2A2A36;
+    border: 1px solid #6A7390;
     border-radius: 10px;
     padding: 6px 10px;
-    color: #F4F5F8;
+    color: #FFFFFF;
     selection-background-color: #3D5A99;
 }
-QLineEdit:focus { border: 1px solid rgba(142, 182, 255, 0.85); }
+QLineEdit:focus { border: 1px solid #8EB6FF; }
 QPushButton {
-    background: rgba(255, 255, 255, 0.06);
-    color: #F4F5F8;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: #2E3448;
+    color: #FFFFFF;
+    border: 1px solid #5C657C;
     border-radius: 10px;
     padding: 6px 12px;
 }
-QPushButton:hover { background: rgba(142, 182, 255, 0.18); }
+QPushButton:hover { background: #3A4670; }
 QPushButton#stop {
     background: #E85D4C;
     border: none;
     color: white;
-    font-weight: 600;
+    font-weight: 700;
 }
 QPushButton#stop:hover { background: #FF6E5C; }
-QPushButton#approve { background: #2F7D5A; border: none; color: white; }
-QPushButton#deny { background: rgba(232, 93, 76, 0.85); border: none; color: white; }
+QPushButton#approve { background: #2F7D5A; border: none; color: white; font-weight: 700; }
+QPushButton#deny { background: #C44B3E; border: none; color: white; font-weight: 700; }
 QPushButton#icon {
-    background: transparent;
-    border: none;
-    padding: 4px;
-    border-radius: 12px;
-    color: #F4F5F8;
+    background: #23232E;
+    border: 1px solid #4A5168;
+    padding: 2px;
+    border-radius: 8px;
+    color: #FFFFFF;
 }
-QPushButton#icon:hover { background: rgba(255, 255, 255, 0.08); }
-QToolButton { color: #9AA0AE; background: transparent; border: none; }
+QPushButton#icon:hover { background: #3A4670; }
 """
 
 DIALOG_QSS = """

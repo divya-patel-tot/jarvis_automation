@@ -28,6 +28,14 @@ on running and done steps. `activity` and `agent_text` stay in the log file.
 
 ## This PC
 
-Windows 10 has no `DWMWA_SYSTEMBACKDROP_TYPE` acrylic backdrop (that attribute is Windows 11). The
-overlay uses the translucent `#141418` glass fallback. `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
-is applied when "Hide from screen share" is on.
+The overlay is frosted glass: the desktop behind the box is blurred, and the panel fill is a dark
+tint with a 12px corner. Window opacity stays at 1, and the text, buttons, and text field stay solid.
+`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is applied when "Hide from screen share" is on.
+
+A quick command that finishes while another task is still running is shown as a banner. It does not
+clear that task's steps, timer, or the original request. "Got it, updating the current task." stays
+in that banner until the task itself finishes.
+
+The panel changes height in one step. Animating a frameless window left copies of the text field and
+STOP button on screen. Spoken answers publish `speaking` and do not publish `idle` when playback ends,
+so the overlay leaves the header on the task or the answer instead of leaving it on "Speaking…".

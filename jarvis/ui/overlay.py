@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import re
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, Property, QPoint, QPropertyAnimation, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from jarvis.ui import winutil
-from jarvis.ui.theme import GLASS, OVERLAY_QSS, STATE_COLOR
+from jarvis.ui.theme import CORNER, GLASS, OVERLAY_QSS, STATE_COLOR
 
 log = logging.getLogger("jarvis.ui")
 
@@ -62,11 +61,8 @@ class Orb(QWidget):
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor(self._color)
-        if self.pulsing:
-            color.setAlpha(170 + int(70 * (0.5 + 0.5 * math.sin(self._phase))))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color)
+        p.setBrush(self._color)
         p.drawEllipse(1, 1, 14, 14)
 
 
@@ -113,7 +109,7 @@ class CommandEdit(QLineEdit):
 
 
 class StepRow(QWidget):
-    GLYPH = {"running": "·", "done": "✓", "failed": "✗", "blocked": "🛡", "held": "⏸"}
+    GLYPH = {"running": "●", "done": "✓", "failed": "✕", "blocked": "!", "held": "Ⅱ"}
 
     def __init__(self, title: str) -> None:
         super().__init__()
@@ -125,7 +121,7 @@ class StepRow(QWidget):
         lay.setSpacing(8)
         self._glyph = QLabel("·")
         self._glyph.setFixedWidth(18)
-        self._glyph.setFont(QFont("Segoe UI Emoji", 11))
+        self._glyph.setFont(QFont("Segoe UI", 11))
         self._title = QLabel(title)
         self._title.setWordWrap(True)
         self._detail = QLabel("")
@@ -184,48 +180,63 @@ class Overlay(QWidget):
         self._nonce = ""
         self._approval_deadline = 0.0
         self._approval_total = 1.0
+        self._request = ""
+        self._working = False
+        self._stopped = False
+        self._side = False
         self._spoken = ""
 
+        self.setObjectName("overlay")
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setWindowOpacity(1.0)
         self.setFixedWidth(WIDTH)
         self.setFixedHeight(COLLAPSED_H)
         self.setWindowTitle("Jarvis")
+        font = QFont("Segoe UI", 10)
+        font.setWeight(QFont.Weight.Medium)
+        self.setFont(font)
         self.setStyleSheet(OVERLAY_QSS)
-        self.setFont(QFont("Segoe UI Variable", 10))
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 10, 16, 14)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 12, 16, 14)
+        root.setSpacing(10)
 
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(10)
         self._orb = Orb()
         self._hint = QLabel("Say \u201cHey Jarvis\u201d\u2026")
+        self._hint.setObjectName("hint")
         self._hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._wave = Waveform()
         self._wave.hide()
         self._timer_lbl = QLabel("")
         self._timer_lbl.setObjectName("muted")
-        self._mic = QPushButton("🎤")
+        icon_font = QFont("Segoe MDL2 Assets", 12)
+        self._mic = QPushButton("\uE720")
+        self._mic.setFont(icon_font)
         self._mic.setObjectName("icon")
-        self._mic.setFixedSize(28, 28)
+        self._mic.setFixedSize(30, 30)
         self._mic.setToolTip("Talk")
-        self._gear = QPushButton("⚙")
+        self._gear = QPushButton("\uE713")
+        self._gear.setFont(icon_font)
         self._gear.setObjectName("icon")
-        self._gear.setFixedSize(28, 28)
+        self._gear.setFixedSize(30, 30)
         self._gear.setToolTip("Settings")
-        header.addWidget(self._orb)
-        header.addWidget(self._hint, 1)
-        header.addWidget(self._wave)
-        header.addWidget(self._timer_lbl)
-        header.addWidget(self._mic)
-        header.addWidget(self._gear)
+        header.addWidget(self._orb, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._hint, 1, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._wave, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._timer_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._mic, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self._gear, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addLayout(header)
         self._header_bottom = 40
 
         self._body = QWidget()
+        self._body.setObjectName("body")
         body = QVBoxLayout(self._body)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(8)
@@ -235,6 +246,11 @@ class Overlay(QWidget):
         self._you.setWordWrap(True)
         self._you.hide()
         body.addWidget(self._you)
+        self._notice = QLabel("")
+        self._notice.setObjectName("notice")
+        self._notice.setWordWrap(True)
+        self._notice.hide()
+        body.addWidget(self._notice)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -253,7 +269,9 @@ class Overlay(QWidget):
         self._hint.installEventFilter(self)
         self._scroll.setWidget(inner)
         self._scroll.setMinimumHeight(0)
-        body.addWidget(self._scroll, 1)
+        self._scroll.setMaximumHeight(260)
+        self._scroll.viewport().setAutoFillBackground(False)
+        body.addWidget(self._scroll, 0)
 
         self._result = QWidget()
         self._result.setObjectName("card")
@@ -334,11 +352,13 @@ class Overlay(QWidget):
         body.addWidget(self._queue)
 
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         self._input = CommandEdit()
         self._input.setPlaceholderText("Type a request")
+        self._input.setFixedHeight(36)
         self._stop = QPushButton("STOP")
         self._stop.setObjectName("stop")
-        self._stop.setFixedWidth(72)
+        self._stop.setFixedSize(76, 36)
         bar.addWidget(self._input, 1)
         bar.addWidget(self._stop)
         body.addLayout(bar)
@@ -367,7 +387,6 @@ class Overlay(QWidget):
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.setInterval(8000)
         self._collapse_timer.timeout.connect(self._maybe_collapse)
-        self._anim: QPropertyAnimation | None = None
 
         bridge.state.connect(self._on_state)
         bridge.mic_level.connect(self._on_level)
@@ -382,37 +401,32 @@ class Overlay(QWidget):
         bridge.voice_status.connect(self._on_voice_status)
         bridge.notify.connect(self._on_notify)
         bridge.show_overlay.connect(lambda _e: self.reveal())
+        bridge.say.connect(self._on_say)
 
         self._place()
-        self._fade(0.6)
+        self.setWindowOpacity(1.0)
 
     # ------------------------------------------------------------------ window chrome
-    def get_panel_height(self) -> int:
-        return self._panel_h
-
-    def set_panel_height(self, value: int) -> None:
-        self._panel_h = int(value)
-        self.setFixedHeight(self._panel_h)
-
-    panelHeight = Property(int, get_panel_height, set_panel_height)
-
     def paintEvent(self, _event) -> None:  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(6, 4, -6, -8)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(0, 0, 0, 50))
-        p.drawRoundedRect(rect.adjusted(0, 3, 0, 3), 18, 18)
-        p.setBrush(QColor(*GLASS))
-        p.setPen(QPen(QColor(255, 255, 255, 32), 1))
-        p.drawRoundedRect(rect, 16, 16)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setPen(QPen(QColor(255, 255, 255, 80)))
+        painter.setBrush(QColor(*GLASS))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), CORNER, CORNER)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        hwnd = int(self.winId())
-        winutil.enable_backdrop(hwnd)
+        self.setWindowOpacity(1.0)
+        self._apply_shape()
         self._apply_capture()
         self._lock_focus()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_shape()
 
     def _place(self) -> None:
         ui = self.runtime.settings.ui
@@ -508,15 +522,12 @@ class Overlay(QWidget):
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self._hover = True
-        self._fade(1.0)
         self._collapse_timer.stop()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._hover = False
-        if not self._expanded and self._state in ("idle", ""):
-            self._fade(0.6)
-        if self._expanded and self._state in ("idle", ""):
+        if self._expanded and not self._busy() and self._state in ("idle", "", "error"):
             self._collapse_timer.start()
         super().leaveEvent(event)
 
@@ -540,49 +551,48 @@ class Overlay(QWidget):
     def expand(self) -> None:
         self._collapse_timer.stop()
         self._body.show()
-        target = 360 if (self._rows or not self._result.isHidden() or self._approval.isVisible()
-                         or self._question.isVisible()) else 240
-        target = min(EXPANDED_MAX, target)
-        if self.windowOpacity() < 0.99:
-            self._fade(1.0)
-        if self._expanded and self._panel_h >= target - 8:
-            return
-        self._animate(target)
+        self._scroll.setVisible(bool(self._rows) or not self._hidden_btn.isHidden())
         self._expanded = True
+        self._fit_content()
+        self.repaint()
 
     def collapse(self) -> None:
-        if self._approval.isVisible() or self._question.isVisible():
+        if self._approval.isVisible() or self._question.isVisible() or self._busy():
             return
         self._expanded = False
-        self._animate(COLLAPSED_H, done=self._finish_collapse)
-        if not self._hover:
-            self._fade(0.6)
+        self._body.hide()
+        self._set_height(COLLAPSED_H)
+        self.repaint()
 
-    def _finish_collapse(self) -> None:
-        if not self._expanded:
-            self._body.hide()
+    def _fit_content(self) -> None:
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.activate()
+        target = max(COLLAPSED_H, min(EXPANDED_MAX, layout.sizeHint().height()))
+        if abs(self._panel_h - target) <= 2:
+            self._apply_shape()
+            return
+        self._set_height(target)
 
-    def _animate(self, height: int, done=None) -> None:
-        anim = QPropertyAnimation(self, b"panelHeight", self)
-        anim.setDuration(200)
-        anim.setStartValue(self._panel_h)
-        anim.setEndValue(height)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        if done is not None:
-            anim.finished.connect(done)
-        anim.start()
-        self._anim = anim
+    def _set_height(self, height: int) -> None:
+        self._panel_h = int(height)
+        self.setFixedHeight(self._panel_h)
+        self._apply_shape()
+        hwnd = int(self.internalWinId() or 0)
+        if hwnd:
+            self.repaint()
+            winutil.redraw(hwnd)
 
-    def _fade(self, opacity: float) -> None:
-        anim = QPropertyAnimation(self, b"windowOpacity", self)
-        anim.setDuration(180)
-        anim.setStartValue(self.windowOpacity())
-        anim.setEndValue(opacity)
-        anim.start()
-        self._fade_anim = anim
+    def _apply_shape(self) -> None:
+        hwnd = int(self.internalWinId() or 0)
+        if not hwnd:
+            return
+        self.setWindowOpacity(1.0)
+        winutil.enable_glass(hwnd)
 
     def _maybe_collapse(self) -> None:
-        if self._hover or self._approval.isVisible() or self._question.isVisible():
+        if self._hover or self._busy() or self._question.isVisible():
             return
         if self._state not in ("idle", "", "error"):
             return
@@ -600,7 +610,7 @@ class Overlay(QWidget):
         self._orb.advance()
         for row in self._rows.values():
             row.tick()
-        if self._task_t0 and self._state not in ("idle", ""):
+        if self._task_t0 and (self._working or self._state not in ("idle", "")):
             elapsed = int(time.monotonic() - self._task_t0)
             self._timer_lbl.setText(f"{elapsed // 60}:{elapsed % 60:02d}")
         if self._approval.isVisible():
@@ -608,20 +618,73 @@ class Overlay(QWidget):
             self._ring.setText(f"{left}s")
 
     # ------------------------------------------------------------------ bus
+    def _busy(self) -> bool:
+        return self._working or self._has_running() or self._approval.isVisible()
+
+    def _has_running(self) -> bool:
+        return any(row.status == "running" for row in self._rows.values())
+
+    def _show_notice(self, text: str) -> None:
+        text = (text or "").strip()
+        self._notice.setText(text)
+        self._notice.setVisible(bool(text))
+
+    def _notice_is_update(self) -> bool:
+        text = self._notice.text().lower()
+        return text.startswith("updating") or "updating the current task" in text
+
+    @staticmethod
+    def _is_fast(event: dict) -> bool:
+        return str(event.get("step_id") or "").endswith("-fast")
+
     def _on_state(self, event: dict) -> None:
         try:
             state = event.get("state") or "idle"
+            # Speech publishes "speaking" and never publishes idle when the utterance ends,
+            # so that state must not stick on the header or keep the timer running.
+            if state == "speaking":
+                return
+            if self._stopped and state == "idle":
+                self._state = "idle"
+                self._working = False
+                self._orb.set_state("idle")
+                self._wave.hide()
+                self._wave.clear()
+                self._hint.setText("Stopped.")
+                self._timer_lbl.setText("")
+                self._stopped = False
+                self._sync_timer()
+                return
+            if self._working and state in ("speaking", "idle"):
+                # "On it." and a quick command's idle must not replace the task on screen.
+                self._orb.set_state("acting")
+                self._hint.setText("Applying your change\u2026" if not self._notice.isHidden() else "Working\u2026")
+                self._wave.hide()
+                self._sync_timer()
+                return
+            if state == "listening" and self._busy():
+                self._state = "listening"
+                self._orb.set_state("listening")
+                self._hint.setText("Hearing your change\u2026")
+                self._wave.show()
+                self.expand()
+                self._sync_timer()
+                return
             self._state = state
             self._orb.set_state(state)
+            if state in ("thinking", "planning", "acting"):
+                self._working = True
+                self._stopped = False
             if state == "listening":
                 self._hint.setText("Listening\u2026")
                 self._wave.show()
                 self.expand()
             elif state == "idle":
-                self._hint.setText("Say \u201cHey Jarvis\u201d\u2026")
                 self._wave.hide()
                 self._wave.clear()
-                self._timer_lbl.setText("")
+                if self._result.isHidden():
+                    self._hint.setText("Say \u201cHey Jarvis\u201d\u2026")
+                    self._timer_lbl.setText("")
             else:
                 self._wave.hide()
                 self._hint.setText({
@@ -629,10 +692,9 @@ class Overlay(QWidget):
                     "planning": "Planning\u2026",
                     "acting": "Working\u2026",
                     "awaiting_approval": "Waiting for you",
-                    "speaking": "Speaking\u2026",
                     "error": "Something went wrong",
                 }.get(state, state))
-                if state in ("thinking", "planning", "acting", "awaiting_approval", "speaking"):
+                if state in ("thinking", "planning", "acting", "awaiting_approval"):
                     self.expand()
             self._sync_timer()
         except Exception:
@@ -651,19 +713,48 @@ class Overlay(QWidget):
             text = (event.get("text") or "").strip()
             if not text:
                 return
+            if self._busy() or self._state in ("thinking", "planning", "acting", "speaking"):
+                self._show_notice("Updating \u2014 " + text)
+                self._hint.setText("Applying your change\u2026")
+                self.expand()
+                return
+            self._request = text
             self._you.setText(text)
             self._you.show()
+            self._show_notice("")
             self.expand()
         except Exception:
             log.exception("transcript slot")
+
+    def _on_say(self, event: dict) -> None:
+        try:
+            text = (event.get("text") or "").strip()
+            low = text.lower()
+            if not text or low.rstrip(".") in ("on it", "theek hai, kar raha hoon"):
+                return
+            if self._busy() and (
+                "updating the current task" in low or low.startswith("got it")
+                or low.startswith("queued") or low.startswith("already on it")
+            ):
+                if not (self._notice.text().lower().startswith("updating") and "updating the current task" in low):
+                    self._show_notice(text)
+                self._hint.setText("Applying your change\u2026" if "updating" in low or low.startswith("got it") else "Working\u2026")
+                self.expand()
+        except Exception:
+            log.exception("say slot")
 
     def _on_task(self, event: dict) -> None:
         try:
             task_id = event.get("task_id") or ""
             if task_id:
                 self._tasks[task_id] = dict(event)
-            if event.get("status") == "started":
+            if event.get("status") == "started" and not self._busy():
                 self._task_t0 = time.monotonic()
+                request = (event.get("request") or "").strip()
+                if request:
+                    self._request = request
+                    self._you.setText(request)
+                    self._you.show()
                 self.expand()
             self._refresh_queue()
         except Exception:
@@ -671,12 +762,21 @@ class Overlay(QWidget):
 
     def _on_step(self, event: dict) -> None:
         try:
+            if self._is_fast(event):
+                self._side = self._working or self._has_running()
+                title = (event.get("title") or "").strip()
+                if self._side and title and not self._notice_is_update():
+                    self._show_notice(title)
+                return
             task_id = event.get("task_id") or ""
             if task_id and task_id != self._step_task:
                 self._clear_steps()
                 self._step_task = task_id
+                self._show_notice("")
                 if not self._task_t0:
                     self._task_t0 = time.monotonic()
+            self._working = True
+            self._stopped = False
             if event.get("internal") and not self._show_hidden:
                 self._hidden.append(dict(event))
                 self._hidden_btn.setText(f"{len(self._hidden)} hidden step{'s' if len(self._hidden) != 1 else ''}")
@@ -707,6 +807,7 @@ class Overlay(QWidget):
         self._hidden.clear()
         self._hidden_btn.hide()
         self._result.hide()
+        self._working = False
 
     def _toggle_hidden(self) -> None:
         self._show_hidden = not self._show_hidden
@@ -727,15 +828,28 @@ class Overlay(QWidget):
             details = getattr(result, "details", "") or ""
             if not spoken and not details:
                 return
+            side = self._side
+            self._side = False
+            if side and self._working:
+                extra = spoken or details[:160]
+                if extra and self._notice_is_update():
+                    self._show_notice(self._notice.text() + "\n" + extra)
+                else:
+                    self._show_notice(extra)
+                self.expand()
+                return
+            self._working = False
+            if not self._notice_is_update():
+                self._show_notice("")
             self._spoken = spoken
             self._spoken_lbl.setText(spoken)
             verified = getattr(result, "verified", None)
             status = getattr(result, "status", "")
             if verified is True:
-                self._badge.setText("✓ verified")
+                self._badge.setText("Verified")
                 self._badge.setObjectName("badgeOk")
             elif verified is False or status == "unverified":
-                self._badge.setText("⚠ unverified")
+                self._badge.setText("Unverified")
                 self._badge.setObjectName("badgeWarn")
             else:
                 self._badge.setText(status or "")
@@ -758,9 +872,9 @@ class Overlay(QWidget):
                 btn.clicked.connect(lambda _=False, p=path: self._open_folder(p))
                 self._files.addWidget(btn)
             self._result.show()
+            self._hint.setText(spoken[:90] or "Done")
             self.expand()
-            if self._state in ("idle", "", "error"):
-                self._collapse_timer.start()
+            self._collapse_timer.start()
         except Exception:
             log.exception("result slot")
 
@@ -812,21 +926,23 @@ class Overlay(QWidget):
 
     def _on_voice_status(self, event: dict) -> None:
         try:
+            if self._busy():
+                return
             text = (event.get("text") or "").strip()
-            if text and self._state in ("idle", "listening"):
-                self._hint.setText(text[:120])
+            low = text.lower()
+            if low.startswith("listening") or low.startswith("push-to-talk"):
+                self._hint.setText(text[:80])
         except Exception:
             log.exception("voice status slot")
 
     def _on_notify(self, event: dict) -> None:
         try:
-            text = event.get("text") or ""
-            title = event.get("title") or "Jarvis"
-            if text and not self.isVisible():
+            if self._busy():
                 return
+            text = (event.get("text") or "").strip()
             if text:
-                self._queue.setText(f"{title}: {text}"[:200])
-                self._queue.show()
+                self._show_notice(f"{event.get('title') or 'Jarvis'}: {text}"[:200])
+                self.expand()
         except Exception:
             log.exception("notify slot")
 
@@ -863,11 +979,23 @@ class Overlay(QWidget):
         if not text:
             return
         self._input.clear()
-        self._you.setText(text)
-        self._you.show()
+        if self._busy() or self._state in ("thinking", "planning", "acting", "speaking"):
+            self._show_notice("Updating \u2014 " + text)
+            self._hint.setText("Applying your change\u2026")
+        else:
+            self._request = text
+            self._you.setText(text)
+            self._you.show()
         self.runtime.submit(text)
 
     def _stop_clicked(self) -> None:
+        self._stopped = True
+        self._working = False
+        self._side = False
+        self._show_notice("")
+        for row in list(self._rows.values()):
+            if row.status == "running":
+                row.set_status("held", row._title.text(), "Stopped")
         self._hint.setText("Stopped.")
         self.runtime.kill()
 

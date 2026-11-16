@@ -193,8 +193,93 @@ def test_overlay_shows_titles_not_commands():
                                                   files_changed=["C:/Users/x/Desktop/note.txt"])})
         app.processEvents()
         assert overlay._spoken_lbl.text() == "Wrote hello in Notepad."
-        assert "verified" in overlay._badge.text()
+        assert "verified" in overlay._badge.text().lower()
         assert overlay._files.count() == 1
+        assert overlay.windowOpacity() == 1.0
+    finally:
+        bridge.close()
+        overlay.close()
+
+
+def test_overlay_stays_solid_and_keeps_the_task_during_an_interruption():
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from jarvis.ui.bridge import BusBridge
+    from jarvis.ui.overlay import Overlay
+
+    app = QApplication.instance() or QApplication([])
+    bridge = BusBridge()
+    overlay = Overlay(JarvisRuntime(Settings(), voice=False, console=False, orchestrator=FakeOrch()), bridge)
+    try:
+        assert overlay.windowOpacity() == 1.0
+        assert overlay.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        bridge.transcript.emit({"text": "open notepad and type hello"})
+        bridge.state.emit({"state": "thinking"})
+        bridge.step.emit({
+            "task_id": "t1", "step_id": "open", "status": "running", "title": "Opening Notepad",
+            "detail": "", "internal": False,
+        })
+        app.processEvents()
+        started = overlay._task_t0
+        assert overlay._you.text() == "open notepad and type hello"
+        assert "Speaking" not in overlay._hint.text()
+
+        bridge.state.emit({"state": "speaking"})
+        bridge.state.emit({"state": "idle"})
+        bridge.task.emit({"task_id": "other", "status": "started", "request": "what time is it"})
+        bridge.transcript.emit({"text": "actually make the text blue"})
+        bridge.say.emit({"text": "Got it, updating the current task."})
+        bridge.step.emit({
+            "task_id": "clock", "step_id": "clock-fast", "status": "done", "title": "Checking the time",
+            "detail": "Get-Date", "internal": False,
+        })
+        bridge.result.emit({"result": TaskResult("success", "It is 3:42.")})
+        app.processEvents()
+
+        assert overlay._task_t0 == started
+        assert overlay._you.text() == "open notepad and type hello"
+        assert "open" in overlay._rows
+        assert "updating" in overlay._notice.text().lower()
+        assert "3:42" in overlay._notice.text()
+        assert overlay._spoken_lbl.text() != "It is 3:42."
+        assert "Hey Jarvis" not in overlay._hint.text()
+        assert "Speaking" not in overlay._hint.text()
+        assert overlay.windowOpacity() == 1.0
+
+        overlay.collapse()
+        app.processEvents()
+        assert overlay.windowOpacity() == 1.0
+        assert "open" in overlay._rows
+    finally:
+        bridge.close()
+        overlay.close()
+
+
+def test_speaking_does_not_stick_and_the_panel_opens_in_one_step():
+    from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
+
+    from jarvis.ui.bridge import BusBridge
+    from jarvis.ui.overlay import Overlay
+
+    app = QApplication.instance() or QApplication([])
+    bridge = BusBridge()
+    overlay = Overlay(JarvisRuntime(Settings(), voice=False, console=False, orchestrator=FakeOrch()), bridge)
+    try:
+        bridge.result.emit({"result": TaskResult("success", "Opened Notepad.")})
+        bridge.state.emit({"state": "idle"})
+        app.processEvents()
+        assert overlay._hint.text() == "Opened Notepad."
+        bridge.state.emit({"state": "speaking"})
+        app.processEvents()
+        assert overlay._state == "idle"
+        assert overlay._hint.text() == "Opened Notepad."
+        overlay.expand()
+        app.processEvents()
+        assert overlay.height() == overlay._panel_h
+        assert len(overlay.findChildren(QLineEdit)) == 2
+        assert len([b for b in overlay.findChildren(QPushButton) if b.text() == "STOP"]) == 1
     finally:
         bridge.close()
         overlay.close()
