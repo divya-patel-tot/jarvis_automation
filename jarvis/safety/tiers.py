@@ -44,6 +44,27 @@ def _any(patterns: list[str], text: str) -> bool:
     return any(re.search(p, text, re.I) for p in patterns)
 
 
+CATASTROPHIC_CUES = [
+    r"\b(disable|turn off|band karo|hata do|bypass)\b.*\b(defender|antivirus|uac|security)\b",
+    r"\b(password|passwords|credential|credentials|cookies|saved logins?)\b.*\b(show|read|dump|export|copy|send|nikalo|batao|steal)\b",
+    r"\b(show|read|dump|export|copy|send|nikalo|batao|steal)\b.*\b(password|passwords|credential|credentials|cookies|saved logins?)\b",
+    r"\bbios\b|\bbcdedit\b|\bboot (config|menu|loader)\b",
+]
+DELETE_CUES = [
+    r"\b(delete|remove|erase|trash|recycle|wipe|purge|uninstall|clean ?up|clear out|empty (the )?(recycle|bin|trash)|format)\b",
+    r"\b(hatao|hata do|mita do|delete karo|saaf karo|uda do)\b",
+]
+
+
+def is_catastrophic_request(text: str) -> bool:
+    """Blocked even in full autonomy: credential theft, disabling protections, boot config."""
+    return _any(CATASTROPHIC_CUES, text.lower())
+
+
+def is_delete_request(text: str) -> bool:
+    return _any(DELETE_CUES, text.lower())
+
+
 def classify_request(text: str, overrides: dict[str, int] | None = None) -> tuple[RiskTier, str]:
     t = text.lower()
     if _any(FORBIDDEN_CUES, t):

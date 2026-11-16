@@ -36,7 +36,7 @@ class VoiceSettings:
     wake_phrases: list[str] = field(default_factory=lambda: ["hey jarvis", "ok jarvis", "jarvis"])
     wake_confidence: str = "medium"       # low | medium | high (WinRT confidence)
     stt_engine: str = "windows"           # windows | whisper
-    stt_language: str = "en-IN"           # Windows speech language tag
+    stt_language: str = "en-US"           # Windows speech language tag (English)
     whisper_model: str = "small"          # used when stt_engine == whisper
     tts_enabled: bool = True
     tts_voice: str = ""                   # substring of an installed SAPI voice name
@@ -65,7 +65,11 @@ class Settings:
     # workspace need execute mode with an approved plan and must fall here.
     allowed_folders: list[str] = field(default_factory=lambda: ["desktop", "downloads", "documents", "pictures"])
     excluded_folders: list[str] = field(default_factory=list)
-    plan_first_tier: int = 1              # tiers >= this run plan-then-execute (1 = everything that changes state)
+    # "full": one command -> done. Runs everything directly on the PC; ONLY deletions
+    #         (and actions suggested by untrusted web/PDF/clipboard content) ask once.
+    # "safe": original plan -> approve -> execute for anything that changes state.
+    autonomy: str = "full"
+    plan_first_tier: int = 1              # safe mode only: tiers >= this run plan-then-execute
     allow_install_software: bool = False  # unlocked in settings only
     desktop_control_enabled: bool = False # MCP UIA tools
     vision_enabled: bool = False

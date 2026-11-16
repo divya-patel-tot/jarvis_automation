@@ -1,4 +1,4 @@
-"""Observer (plan 4.1.9, 10.2.9): watches every agent event live.
+﻿"""Observer (plan 4.1.9, 10.2.9): watches every agent event live.
 
 * feeds the activity feed (event bus) and the audit log
 * enforces budgets and the three timeouts (first event, idle, wall clock)
@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from pathlib import Path
 from typing import Callable
 
@@ -157,6 +156,10 @@ class Observer:
                 continue
             if d.get("action") == "deny":
                 self.blocked.append(d)
+                if policy.DELETE_MARK in str(d.get("reason", "")):
+                    self.audit.write("delete_held", self.task_id, input=d.get("input"))
+                    bus.publish("activity", task_id=self.task_id, text=f"Delete held for your OK: {str(d.get('input'))[:120]}")
+                    continue
                 self.audit.write("hook_denied", self.task_id, tool=d.get("tool") or d.get("event"),
                                  input=d.get("input"), reason=d.get("reason"), tier=d.get("tier"))
                 bus.publish("activity", task_id=self.task_id, text=f"Blocked: {d.get('reason')}")

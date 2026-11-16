@@ -67,6 +67,34 @@ def direct_prompt(ctx: TaskContext) -> str:
     ])
 
 
+def act_prompt(ctx: TaskContext) -> str:
+    """Full autonomy: one command -> do it completely, now."""
+    return "\n\n".join([
+        _header(ctx),
+        user_block(ctx),
+        "ACT NOW (full autonomy). The user has already decided: carry out the WHOLE request on this PC in one go, "
+        "without asking for permission and without stopping at a draft or a plan. If they asked to send an email "
+        "or message, actually SEND it (lib\\py\\send_mail.py for email). If they asked to install, configure, "
+        "open, write, move or run something, do it. Prefer the capability library; verify the result.",
+        "ONLY exception - deleting anything (files, folders, apps, registry values, data): try it with "
+        "lib\\ps\\recycle.ps1. If Jarvis policy blocks it with 'NEEDS DELETE CONFIRMATION', do everything else, "
+        "then stop and list the exact items to delete in `double_check`; Jarvis asks the user once and lets you finish.",
+        "Ask a question (status needs_input) only if the request is genuinely impossible to interpret. "
+        "Finish with the jarvis-result block.",
+    ])
+
+
+def delete_prompt(ctx: TaskContext, items: str) -> str:
+    return "\n\n".join([
+        _header(ctx),
+        user_block(ctx),
+        "The user CONFIRMED these deletions (they were blocked earlier pending confirmation):",
+        "<<<CONFIRMED_DELETIONS\n" + items.strip() + "\nCONFIRMED_DELETIONS>>>",
+        "Delete exactly these now - files/folders via lib\\ps\\recycle.ps1 (Recycle Bin + undo manifest); other "
+        "deletions with the command you tried before. Nothing else. Verify and finish with the jarvis-result block.",
+    ])
+
+
 def clarification_prompt(question: str, answer: str) -> str:
     return (f'You asked the user: "{question}". The user answered: "{answer}". '
             "Continue the same task in the same mode with this answer. Finish with the jarvis-result block.")

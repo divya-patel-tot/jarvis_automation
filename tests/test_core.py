@@ -211,6 +211,27 @@ def test_confirmation_hygiene():
     assert c.click(p2.nonce, "approve") and not c.click(p2.nonce, "deny")   # single use
 
 
+def test_voice_helpers():
+    from jarvis.voice.windows_speech import (explain_winerror, is_wake_text, min_confidence,
+                                             pick_speech_language, remainder_after_wake)
+
+    assert pick_speech_language("en-IN", ["en-IN", "en-US"]) == "en-IN"
+    assert pick_speech_language("hi-IN", ["en-US", "en-IN"]) == "en-US"
+    assert pick_speech_language("en-US", []) == "en-US"
+    assert is_wake_text("Hey Jarvis.", ["hey jarvis", "jarvis"])
+    assert is_wake_text("jarvis", ["hey jarvis", "jarvis"])
+    assert not is_wake_text("open notepad", ["hey jarvis", "jarvis"])
+    assert remainder_after_wake("Hey Jarvis", ["hey jarvis", "jarvis"]) == ""
+    assert remainder_after_wake("hey jarvis what time is it", ["hey jarvis"]) == "what time is it"
+    assert remainder_after_wake("jarvis open notepad", ["hey jarvis", "jarvis"]) == "open notepad"
+    assert min_confidence("high") == 0.8
+    class E(Exception):
+        winerror = -2147199735
+        def __str__(self):
+            return "privacy"
+    assert "Online speech recognition" in explain_winerror(E())
+
+
 def test_memory_alias(tmp_path):
     m = Memory(tmp_path)
     m.remember(r"my project folder is D:\work\proj")

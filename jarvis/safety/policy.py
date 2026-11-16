@@ -1,4 +1,4 @@
-"""Command and path policy engine.
+﻿"""Command and path policy engine.
 
 Pure, stdlib-only and deterministic so it can be imported by the Cursor
 ``preToolUse`` hook process (pre-execution enforcement, Phase 0 D-006) *and*
@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import PureWindowsPath
 from typing import Any, Iterable
 
 # --------------------------------------------------------------------------- shell
@@ -144,6 +143,7 @@ class PolicyContext:
     library_dir: str = ""                               # workspace\lib (vetted scripts)
     library_tiers: dict[str, int] = field(default_factory=dict)  # script stem -> declared tier
     allowed_mcp_tools: list[str] = field(default_factory=list)
+    autonomy: str = "safe"                              # safe | full (see config.Settings.autonomy)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "PolicyContext":
@@ -209,6 +209,8 @@ def check_read(path: str, ctx: PolicyContext) -> Decision:
     reason = sensitive_reason(path)
     if reason:
         return Decision("deny", f"reading {reason} is not allowed", 3)
+    if ctx.autonomy == "full":
+        return Decision("allow", tier=0)
     roots = [ctx.workspace, *ctx.read_roots, *ctx.write_roots]
     if not _in_any(path, roots):
         return Decision("deny", f"read outside allowed folders: {path}", 2)
@@ -224,6 +226,8 @@ def check_write(path: str, ctx: PolicyContext) -> Decision:
         return Decision("deny", "writing to system folders is not allowed", 3)
     if _in_any(path, ctx.protected):
         return Decision("deny", "rule files, capability library, memory and config are read-only for the agent", 3)
+    if ctx.autonomy == "full" and ctx.mode != "plan":
+        return Decision("allow", tier=1)
     if ctx.mode == "plan":
         # Plan phase: nothing may change, except notes inside the task folder.
         if ctx.task_folder and is_within(path, ctx.task_folder):
@@ -261,7 +265,71 @@ def library_call_tier(command: str, ctx: PolicyContext) -> int | None:
     return max(tiers)
 
 
+# ----------------------------------------------------------------- full autonomy
+# Never allowed, even in full autonomy: stealing credentials or switching off the
+# PC's own protections. Everything else the user asks for is allowed.
+ALWAYS_FORBIDDEN: list[tuple[str, str]] = [
+    (r"\b(set-mppreference|add-mppreference|remove-mppreference)\b", "Defender settings"),
+    (r"\b(mimikatz|procdump|lsass|sekurlsa|vaultcmd)\b", "credential theft"),
+    (r"\b(convertfrom-securestring|export-pfxcertificate)\b", "credential export"),
+    (r"\b(consentpromptbehavior|enablelua)\b", "UAC tampering"),
+    (r"\b(bcdedit|bootrec|bcdboot)\b", "boot configuration"),
+    (r"\b(vssadmin|wbadmin|wmic\s+shadowcopy)\b", "backup/shadow copy tampering"),
+    (r"\bwevtutil\s+(cl|clear-log)|clear-eventlog\b", "log tampering"),
+    (r"\b(add-type)\b[^|;]*dllimport", "native code injection"),
+]
+# Deleting/destroying data: allowed in full autonomy only after ONE confirmation.
+DELETE_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(remove-item|ri|rm|rmdir|rd|del|erase)\b", "deletes files"),
+    (r"\brecycle\.ps1\b", "recycles files"),
+    (r"\b(clear-recyclebin|clear-content|clear-item)\b", "clears data"),
+    (r"\[(system\.)?io\.(file|directory)\]::delete\b|\.delete\(\)", "deletes files"),
+    (r"\bformat(\.com)?\s+[a-z]:|\b(format-volume|clear-disk|initialize-disk|remove-partition|diskpart)\b"
+     r"|\bcipher(\.exe)?\s+/w", "erases a disk"),
+    (r"\b(winget|choco|scoop)\s+(uninstall|remove)\b|\bmsiexec\b[^|;]*\s/x\b|\buninstall-package\b|\bremove-appxpackage\b",
+     "uninstalls software"),
+    (r"\b(remove-localuser|net\s+user\s+\S+\s+/delete)\b", "deletes a user account"),
+    (r"\breg(\.exe)?\s+delete\b|\bremove-itemproperty\b", "deletes registry data"),
+    (r"\bgit\s+(clean\s+-[a-z]*f|reset\s+--hard|push\s+.*--force)", "discards git data"),
+]
+NETWORK_SEND = re.compile(r"\b(invoke-webrequest|iwr|irm|invoke-restmethod|curl|wget|start-bitstransfer|"
+                          r"send-mailmessage|send_mail\.py|ftp|scp|sftp)\b", re.I)
+DELETE_MARK = "NEEDS DELETE CONFIRMATION"
+
+
+def is_delete_command(command: str) -> str | None:
+    return match_patterns(command or "", DELETE_PATTERNS)
+
+
+def _check_shell_full(command: str, ctx: PolicyContext) -> Decision:
+    reason = match_patterns(command, ALWAYS_FORBIDDEN)
+    if reason:
+        return Decision("deny", f"forbidden: {reason}", 3)
+    is_lib = library_call_tier(command, ctx) is not None
+    for raw in extract_paths(command):
+        r = sensitive_reason(raw)
+        if r:
+            return Decision("deny", f"command touches {r}", 3)
+        # Protected Jarvis files (rules, hook, library, memory, app data): read/run only.
+        if _in_any(raw, ctx.protected) and not is_lib and classify_command(command)[0] >= 1:
+            return Decision("deny", "Jarvis's own rules/library/config can't be modified by the agent", 3)
+    if ctx.tainted:
+        # Untrusted content was read in this task: keep the injection defences.
+        r = match_patterns(command, FORBIDDEN_COMMAND_PATTERNS)
+        if r:
+            return Decision("deny", f"blocked after reading untrusted content: {r}", 3)
+        if NETWORK_SEND.search(command):
+            return Decision("deny", "network send blocked: this task read untrusted web/document content", 2)
+    deletes = is_delete_command(command)
+    if deletes and ctx.mode != "execute":
+        return Decision("deny", f"{DELETE_MARK}: {deletes}. Stop and list exactly what you wanted to delete; "
+                                "Jarvis will ask the user once and then let you do it", 2)
+    return Decision("allow", tier=2 if deletes else 1)
+
+
 def check_shell(command: str, ctx: PolicyContext) -> Decision:
+    if ctx.autonomy == "full" and ctx.mode != "plan":
+        return _check_shell_full(command, ctx)
     tier, reason = classify_command(command)
     if tier >= 3:
         return Decision("deny", f"forbidden: {reason}", 3)
@@ -308,6 +376,8 @@ def check_url(url: str, ctx: PolicyContext) -> Decision:
     host = re.sub(r"^[a-z]+://", "", url.lower()).split("/")[0].split(":")[0]
     if any(host == d or host.endswith("." + d) for d in ctx.web_allowlist):
         return Decision("allow", tier=0)
+    if ctx.autonomy == "full" and not ctx.tainted:
+        return Decision("allow", tier=1)
     if ctx.allow_network and not ctx.tainted:
         return Decision("allow", tier=1)
     return Decision("deny", f"web fetch outside allowlist: {host}", 2)
@@ -360,6 +430,10 @@ def check_tool(name: str, args: dict[str, Any] | None, ctx: PolicyContext,
         return check_read(path, ctx) if path else Decision("allow")
     if cat == "file_write":
         path = _first(args, "file_path", "path", "target_file", "filePath")
+        is_delete_tool = "delete" in (name or "").lower()
+        if is_delete_tool and ctx.autonomy == "full" and ctx.mode != "execute":
+            return Decision("deny", f"{DELETE_MARK}: deletes {path}. Stop and list exactly what you wanted to "
+                                    "delete; Jarvis will ask the user once", 2)
         return check_write(path, ctx) if path else Decision("deny", "write without a path", 2)
     if cat == "web_fetch":
         url = _first(args, "url", "uri")

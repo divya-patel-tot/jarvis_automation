@@ -25,7 +25,8 @@ from jarvis.result_parser import parse_result
 from jarvis.router.router import Router
 from jarvis.safety.budgets import UsageLedger
 from jarvis.safety.confirm import ConfirmationBroker, confirmation_text, spoken_summary
-from jarvis.safety.tiers import build_plan, classify_request
+from jarvis.safety.policy import DELETE_MARK
+from jarvis.safety.tiers import build_plan, classify_request, is_catastrophic_request, is_delete_request
 from jarvis.scheduler import Scheduler
 from jarvis.senses import ingest, screen
 from jarvis.workspace.manager import Workspace
@@ -46,7 +47,10 @@ class Orchestrator:
         self.router = Router(self.apps, self.memory, settings.tier_overrides)
         self.backends = BackendManager(settings)
         self.ledger = UsageLedger(settings.budgets)
-        self.confirm = ConfirmationBroker(settings.voice.voice_confirm_tier2, settings.voice.confirm_phrase)
+        # Full autonomy: a fresh spoken "confirm" may approve a deletion (never the utterance that asked for it).
+        self.confirm = ConfirmationBroker(settings.voice.voice_confirm_tier2 or settings.autonomy == "full",
+                                          settings.voice.confirm_phrase)
+        self._last_blocked: list[dict] = []
         self.scheduler = Scheduler(settings.routines, self.run_routine)
         self.ask_user = ask_user          # synchronous clarifying-question callback (console/voice)
         self.busy = threading.Lock()
@@ -252,6 +256,9 @@ class Orchestrator:
             return TaskResult("failed", "The Cursor agent isn't available right now, so I can only do quick "
                                         "commands.", self.backends.degraded_reason)
         tier, why = classify_request(req.text, self.s.tier_overrides)
+        full = self.s.autonomy == "full"
+        if full and tier == RiskTier.FORBIDDEN and not is_catastrophic_request(req.text):
+            tier, why = RiskTier.CONSEQUENTIAL, why + " (full autonomy: confirm once instead of blocking)"
         if tier == RiskTier.FORBIDDEN:
             self.audit.write("forbidden_request", req.id, text=req.text, reason=why)
             return TaskResult("blocked", "I can't do that; it touches protected parts of the system.", why)
@@ -273,7 +280,11 @@ class Orchestrator:
                          ingested=ctx.ingested)
         session = "conversation" if not ctx.tainted else ""
         try:
-            if tier == RiskTier.READ_ONLY and tier < self.s.plan_first_tier + 1 and not self._mentions_change(req.text):
+            if full:
+                # One command -> done. Only explicit delete requests go through plan + one confirmation.
+                result = (self._plan_then_execute(ctx, session) if is_delete_request(req.text)
+                          else self._act(ctx, session))
+            elif tier == RiskTier.READ_ONLY and tier < self.s.plan_first_tier + 1 and not self._mentions_change(req.text):
                 result = self._run_phase(ctx, Mode.DIRECT, prompts.direct_prompt(ctx), session, strong=False)
             else:
                 result = self._plan_then_execute(ctx, session)
@@ -302,6 +313,32 @@ class Orchestrator:
                 "offline": "I'm offline, so I can only do quick commands.",
                 "not_enabled": "The Cursor SDK isn't enabled for this account; switching to the CLI may help."
                 }.get(code, "The Cursor agent failed to start.")
+
+    def _act(self, ctx: TaskContext, session: str) -> TaskResult:
+        """Full autonomy: run the whole request directly; confirm only held deletions."""
+        bus.publish("state", state="acting")
+        r = self._run_phase(ctx, Mode.DIRECT, prompts.act_prompt(ctx), session, strong=True)
+        held = [b for b in self._last_blocked if DELETE_MARK in str(b.get("reason", ""))]
+        if not held:
+            return r
+        items = "\n".join(f"- {str(b.get('input') or '')[:300]}" for b in held[:30])
+        extra = "\n".join(f"- {d}" for d in r.double_check[:30])
+        text = (f"Request: {ctx.request.text[:200]}\n\nEverything else is done. It also needs to DELETE:\n{items}"
+                + (f"\n\nAgent's list:\n{extra}" if extra else "")
+                + "\n\nDeleted files go to the Recycle Bin (say 'undo that' to restore).")
+        p = self.confirm.request(ctx.task_id, text, RiskTier.CONSEQUENTIAL, ctx.request.id)
+        bus.publish("say", text="That includes deleting something. Say confirm, or approve on screen.")
+        bus.publish("state", state="awaiting_approval")
+        decision = self.confirm.wait(p)
+        self.audit.write("delete_approval", ctx.task_id, decision=decision, channel=p.channel, items=items)
+        if decision != "approve":
+            r.status = "partial"
+            r.spoken = "Done, except the deletion, which I skipped."
+            return r
+        ctx.approved = True
+        bus.publish("state", state="acting")
+        return self._run_phase(ctx, Mode.EXECUTE, prompts.delete_prompt(ctx, items + ("\n" + extra if extra else "")),
+                               session, strong=False)
 
     def _plan_then_execute(self, ctx: TaskContext, session: str) -> TaskResult:
         revision = ""
@@ -351,11 +388,12 @@ class Orchestrator:
         return TaskResult("needs_input", "I couldn't settle on a plan. Please rephrase the request.")
 
     def _run_phase(self, ctx: TaskContext, mode: Mode, prompt: str, session: str, strong: bool,
-                   outcome_box: dict | None = None) -> TaskResult:
+                   outcome_box: dict | None = None, autonomy: str | None = None) -> TaskResult:
         tampered = self.ws.verify_integrity()
         if tampered:
             self.audit.write("integrity_restored", ctx.task_id, files=tampered)
-        pctx = self.ws.policy_context(ctx, mode)
+        pctx = self.ws.policy_context(ctx, mode, autonomy=autonomy)
+        self._last_blocked = []
         self.ws.write_policy_state(pctx)
         self._write_state(ctx, "running", mode.value)
         phase = mode.value
@@ -372,6 +410,7 @@ class Orchestrator:
 
         with obs:
             outcome = self.backends.run(spec, on_event)
+        self._last_blocked = list(obs.blocked)
         self.ledger.record(runs=1, tokens=int(outcome.usage.get("total_tokens", 0) or
                                               outcome.usage.get("input_tokens", 0) + outcome.usage.get("output_tokens", 0)),
                            tool_calls=outcome.tool_calls, seconds=outcome.duration_s)
@@ -430,7 +469,8 @@ class Orchestrator:
         try:
             ctx = self.ws.new_task(req)
             self.ws.write_context(ctx, {"Routine": routine.get("name", "")})
-            r = self._run_phase(ctx, Mode.DIRECT, prompts.direct_prompt(ctx), "", strong=False)
+            # Unattended -> always SAFE autonomy (tier 0/1 only), whatever the global setting is.
+            r = self._run_phase(ctx, Mode.DIRECT, prompts.direct_prompt(ctx), "", strong=False, autonomy="safe")
             self._finish(ctx, r)
             bus.publish("notify", title=f"Routine: {routine.get('name', '')}", text=r.spoken)
             bus.publish("say", text=r.spoken)

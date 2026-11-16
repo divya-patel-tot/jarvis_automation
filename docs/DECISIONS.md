@@ -9,3 +9,4 @@
 - **D-007 No FS sandbox**: agent file tools can write outside the workspace → enforced by the hook (path policy).
 - **D-008 Voice**: Windows dictation langs en-IN/en-US (no hi-IN); voices David/Zira; online-speech privacy toggle OFF and no microphone on this machine at test time.
 - **D-009 Isolation**: separate low-privilege Windows user not yet set up → reduced isolation; compensated by hook + plan gate + observer.
+- **D-010 Autonomy (user requirement, 2026-11-16)**: default `autonomy=full` - one command runs to completion (incl. installs, settings, real email via `send_mail.py`); only deletions are held by the hook (`NEEDS DELETE CONFIRMATION`) and confirmed once (click or fresh spoken 'confirm'). Always blocked: credential theft, disabling Defender/UAC, boot config, backup/log tampering. After untrusted content: network sends + tier-3 blocked. Routines always run in safe mode. E2E: create = 0 approvals, delete = 1 approval -> Recycle Bin.

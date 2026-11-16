@@ -147,9 +147,12 @@ class Workspace:
 
     def write_context(self, ctx: TaskContext, extra: dict[str, str]) -> Path:
         allowed = [str(p) for p in self.settings.allowed_folder_paths()]
+        full = getattr(self.settings, "autonomy", "safe") == "full"
         lines = ["# Task context", "", f"Task folder: {ctx.folder}", f"Outputs folder: {self.outputs}",
                  f"Time: {time.strftime('%A %d %B %Y, %H:%M')}", "",
-                 "User folders you may read (writes only inside an approved plan):"]
+                 f"Autonomy: {'FULL - do the whole request now; only deletions need the user' if full else 'SAFE'}",
+                 f"User profile: {Path.home()}", "",
+                 "Main user folders:" if full else "User folders you may read (writes only inside an approved plan):"]
         lines += [f"- {p}" for p in allowed] or ["- (none)"]
         for key, value in extra.items():
             if value:
@@ -158,8 +161,10 @@ class Workspace:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
 
-    def policy_context(self, ctx: TaskContext, mode: Mode, allowed_mcp_tools: list[str] | None = None) -> PolicyContext:
+    def policy_context(self, ctx: TaskContext, mode: Mode, allowed_mcp_tools: list[str] | None = None,
+                       autonomy: str | None = None) -> PolicyContext:
         s = self.settings
+        autonomy = autonomy or getattr(s, "autonomy", "safe")
         roots = [str(p) for p in s.allowed_folder_paths() if str(p) not in s.excluded_folders]
         return PolicyContext(
             mode=mode.value,
@@ -178,6 +183,7 @@ class Workspace:
             library_dir=str(self.lib),
             library_tiers=self.library_tiers(),
             allowed_mcp_tools=list(allowed_mcp_tools or []),
+            autonomy=autonomy,
         )
 
     def write_policy_state(self, pctx: PolicyContext) -> Path:

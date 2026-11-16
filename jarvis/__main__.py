@@ -40,11 +40,14 @@ def start_hotkeys(on_kill, on_ptt) -> None:
         ok2 = user32.RegisterHotKey(None, 2, MOD_CONTROL | MOD_ALT, 0x20)    # Space
         if not ok1:
             log.warning("could not register Ctrl+Alt+K kill hotkey (in use?)")
+        if not ok2:
+            log.warning("could not register Ctrl+Alt+Space push-to-talk (in use?)")
+        else:
+            log.info("hotkeys: Ctrl+Alt+K = stop, Ctrl+Alt+Space = push-to-talk")
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == WM_HOTKEY:
                 (on_kill if msg.wParam == 1 else on_ptt)()
-        _ = ok2
     threading.Thread(target=loop, name="hotkeys", daemon=True).start()
 
 
@@ -73,32 +76,9 @@ def doctor() -> int:
     bm.close()
     ok, n = AuditLog().verify()
     checks.append(("Audit chain", ok, f"{n} lines"))
-    try:
-        from winrt.windows.media.speechrecognition import SpeechRecognizer
+    from jarvis.voice.windows_speech import voice_health
 
-        langs = [l.language_tag for l in SpeechRecognizer.supported_topic_languages]
-        checks.append(("Windows speech (dictation langs)", bool(langs), ", ".join(langs)))
-    except Exception as exc:
-        checks.append(("Windows speech", False, str(exc)))
-    try:
-        import winreg
-
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy")
-        accepted = bool(winreg.QueryValueEx(k, "HasAccepted")[0])
-    except OSError:
-        accepted = False
-    checks.append(("Online speech recognition ON", accepted,
-                   "ok" if accepted else "Settings > Privacy > Speech > Online speech recognition (needed for dictation)"))
-    try:
-        import subprocess
-
-        r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "@(Get-PnpDevice -Class AudioEndpoint -Status OK | Where-Object { $_.FriendlyName -match 'Microphone|Mic|Headset|Array' }).Count"],
-                           capture_output=True, text=True, timeout=20)
-        mics = int((r.stdout or "0").strip() or 0)
-    except Exception:
-        mics = 0
-    checks.append(("Microphone", mics > 0, f"{mics} found" if mics else "none detected - voice disabled until one is connected"))
+    checks.extend(voice_health())
     width = max(len(c[0]) for c in checks)
     for name, good, detail in checks:
         _print(f"  [{'OK ' if good else '!! '}] {name.ljust(width)}  {detail}")
@@ -128,7 +108,19 @@ def run(voice: bool) -> int:
     bus.subscribe("activity", lambda e: _print(f"   · {e['text']}") if e.get("text") else None)
     bus.subscribe("error", lambda e: _print(f"!! {e['text']}"))
     bus.subscribe("notify", lambda e: _print(f"[{e.get('title')}] {e.get('text')}"))
-    bus.subscribe("transcript", lambda e: _print(f"\nYou (voice): {e['text']}"))
+    bus.subscribe("transcript", lambda e: _print(f"\nYou (voice): {e['text']}  (conf {e.get('confidence', 0):.0%})"))
+    bus.subscribe("voice_status", lambda e: _print(f"  [voice] {e['text']}") if e.get("text") else None)
+    _last_state = {"v": ""}
+
+    def _show_state(e):
+        st = e.get("state") or ""
+        if st and st != _last_state["v"] and st in ("listening", "speaking", "idle"):
+            _last_state["v"] = st
+            if st == "listening":
+                _print("  [voice] Listening...")
+            elif st == "idle" and _last_state.get("shown"):
+                pass
+    bus.subscribe("state", _show_state)
 
     def show_result(e):
         r = e["result"]
@@ -173,13 +165,17 @@ def run(voice: bool) -> int:
             from jarvis.voice.windows_speech import WindowsListener
 
             listener = WindowsListener(lambda t, c: handle_async(t, Source.VOICE, c), s.voice.wake_phrases,
-                                       s.voice.stt_language, s.voice.follow_up_window_s, s.voice.max_utterance_s)
+                                       s.voice.stt_language, s.voice.follow_up_window_s, s.voice.max_utterance_s,
+                                       s.voice.wake_confidence)
             listener.start()
+            _print("Voice is starting in the background. Typed commands work now; watch [voice] lines.")
         except Exception as exc:
             _print(f"(voice unavailable: {exc})")
+            log.exception("voice failed to start")
     start_hotkeys(orch.kill_switch, (listener.push_to_talk if listener else lambda: None))
 
-    _print("Jarvis is running. Type a request, or say 'Hey Jarvis'. Ctrl+Alt+K = kill switch. 'quit' to exit.")
+    _print(f"Logs: {paths.logs_dir() / 'jarvis.jsonl'}")
+    _print("Jarvis is running. Type a request, or say 'Hey Jarvis'. Ctrl+Alt+Space = talk now. Ctrl+Alt+K = kill switch. 'quit' to exit.")
     try:
         while True:
             try:
@@ -218,14 +214,29 @@ def run(voice: bool) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="jarvis")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "doctor", "set-key", "verify-audit"])
+    ap.add_argument("command", nargs="?", default="run",
+                    choices=["run", "doctor", "set-key", "set-mail", "verify-audit"])
     ap.add_argument("--no-voice", action="store_true")
-    ap.add_argument("--log-level", default="WARNING")
+    ap.add_argument("--log-level", default="INFO")
     a = ap.parse_args()
     logging_setup.setup(a.log_level)
     paths.ensure_app_dirs()
     if a.command == "doctor":
         return doctor()
+    if a.command == "set-mail":
+        import keyring
+
+        _print("Email account Jarvis sends from (Gmail: create an App Password at "
+               "https://myaccount.google.com/apppasswords).")
+        address = input("Email address: ").strip()
+        name = input("Display name (optional): ").strip()
+        host = input("SMTP host [smtp.gmail.com]: ").strip() or "smtp.gmail.com"
+        port = input("SMTP port [587]: ").strip() or "587"
+        pw = getpass.getpass("App password (input hidden): ").replace(" ", "")
+        keyring.set_password("jarvis-mail", "account", json.dumps(
+            {"address": address, "from_name": name, "smtp_host": host, "smtp_port": int(port), "app_password": pw}))
+        _print("Saved to Windows Credential Manager (service 'jarvis-mail').")
+        return 0
     if a.command == "set-key":
         from jarvis.secrets import set_api_key
 

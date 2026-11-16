@@ -35,6 +35,9 @@
   "extract_text": {"file": "py\\extract_text.py", "tier": 0,
     "description": "Extract text from PDF/DOCX/XLSX/TXT/MD/CSV into the task's ingested folder (chunked, labelled untrusted)",
     "usage": "<file> [--out <task folder>\\ingested] [--max-chars 400000]"},
+  "send_mail": {"file": "py\\send_mail.py", "tier": 2,
+    "description": "SEND an email for real via the user's SMTP account (Gmail app password), with attachments. Not a draft.",
+    "usage": "--to a@x.com --subject \"...\" --body \"...\" [--cc ..] [--attach <file>]... [--html]"},
   "web_text": {"file": "py\\web_text.py", "tier": 0,
     "description": "Fetch a web page (allowlisted hosts only) and save readable text as untrusted data",
     "usage": "<url> --out <task folder>\\ingested"}
