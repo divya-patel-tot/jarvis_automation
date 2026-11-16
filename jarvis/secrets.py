@@ -68,10 +68,15 @@ def delete_api_key() -> None:
 
 
 def redact(text: str) -> str:
-    """Remove anything that looks like an API key (and the configured key)."""
+    """Remove anything that looks like an API key (and the configured key).
+
+    Runs INSIDE logging handlers, so it must never import or do I/O: it only uses
+    the key cached by prime_cache() at startup (an import here deadlocked against
+    another thread's import that was logging - D-012).
+    """
     if not text:
         return text
-    key = get_api_key_cached()
+    key = _cached
     if key and key in text:
         text = text.replace(key, "[REDACTED]")
     return _KEY_RE.sub("[REDACTED]", text)
@@ -80,8 +85,13 @@ def redact(text: str) -> str:
 _cached: str | None = None
 
 
-def get_api_key_cached() -> str:
+def prime_cache() -> None:
+    """Load the key once on the main thread before logging/threads start."""
     global _cached
     if _cached is None:
         _cached = get_api_key()
-    return _cached
+
+
+def get_api_key_cached() -> str:
+    prime_cache()
+    return _cached or ""

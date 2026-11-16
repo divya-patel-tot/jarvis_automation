@@ -45,8 +45,14 @@ class WhisperStt:
                     t0 = time.perf_counter()
                     import os
 
-                    self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8",
-                                               cpu_threads=max(2, (os.cpu_count() or 4) - 1))
+                    threads = max(2, (os.cpu_count() or 4) - 1)
+                    try:   # cached model: no network check to HuggingFace (it stalled startup)
+                        self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8",
+                                                   cpu_threads=threads, local_files_only=True)
+                    except Exception:
+                        log.info("whisper model '%s' not cached yet - downloading once", self.model_name)
+                        self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8",
+                                                   cpu_threads=threads)
                     log.info("whisper '%s' loaded in %.1fs", self.model_name, time.perf_counter() - t0)
                 except Exception as exc:
                     self.error = f"Whisper unavailable: {exc}"

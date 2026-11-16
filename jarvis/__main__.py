@@ -169,9 +169,11 @@ def run(voice: bool) -> int:
                                        s.voice.wake_confidence)
             listener.stt_engine = s.voice.stt_engine
             try:
+                import faster_whisper  # noqa: F401  (heavy import on the main thread, not racing other threads)
+
                 from jarvis.voice.whisper_stt import WhisperStt
 
-                hints = ", ".join(sorted({e.name for e in orch.apps.entries})[:60])
+                hints =", ".join(sorted({e.name for e in orch.apps.entries})[:60])
                 listener.whisper = WhisperStt(s.voice.whisper_model, hints)
                 listener.whisper.preload_async()     # load model now, not on the first command
             except ImportError:

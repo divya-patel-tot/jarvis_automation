@@ -40,6 +40,11 @@ class RedactingConsoleFormatter(logging.Formatter):
 
 def setup(level: str = "INFO", console: bool = True) -> None:
     paths.ensure_app_dirs()
+    # Prime the redaction key cache (imports keyring) BEFORE any handler exists, on the main
+    # thread. Never import inside a log handler: that deadlocked against concurrent imports (D-012).
+    from jarvis.secrets import prime_cache
+
+    prime_cache()
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     for h in list(root.handlers):
