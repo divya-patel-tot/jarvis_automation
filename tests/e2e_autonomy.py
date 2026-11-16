@@ -35,7 +35,7 @@ def main() -> None:
         target.unlink()
     out = {}
     t0 = time.time()
-    r = orch.handle(UserRequest(f"create a file named jarvis_full_test.txt on my desktop containing hello from jarvis"))
+    r = orch.handle(UserRequest("create a file named jarvis_full_test.txt on my desktop containing hello from jarvis"))
     out["1_create_no_approval"] = dict(status=r.status, exists=target.exists(), approvals=len(approvals),
                                        spoken=r.spoken, s=round(time.time() - t0, 1))
     n = len(approvals)

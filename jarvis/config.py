@@ -34,7 +34,10 @@ class BudgetSettings:
 class VoiceSettings:
     enabled: bool = True
     wake_phrases: list[str] = field(default_factory=lambda: ["hey jarvis", "ok jarvis", "jarvis"])
-    wake_confidence: str = "medium"       # low | medium | high (WinRT confidence)
+    wake_engine: str = "openwakeword"     # openwakeword (one-breath "hey jarvis <cmd>") | windows (legacy WinRT)
+    wake_threshold: float = 0.5           # openWakeWord score 0..1 (lower = more sensitive)
+    languages: list[str] = field(default_factory=lambda: ["en", "hi"])   # Whisper may only pick these
+    wake_confidence: str = "medium"       # low | medium | high (WinRT confidence, windows engine only)
     stt_engine: str = "whisper"           # whisper (local, reliable, Hindi) | windows (auto-falls back to whisper)
     stt_language: str = "en-US"           # Windows speech language tag (English)
     whisper_model: str = "base"           # base ~1 s/command on CPU; "small" = better Hindi, slower

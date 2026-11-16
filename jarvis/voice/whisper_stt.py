@@ -22,11 +22,49 @@ log = logging.getLogger(__name__)
 RATE = 16_000
 BLOCK = 480          # 30 ms
 
+# Apps people actually say, first in the hotword list (alphabetical Start-menu names drowned "Notepad").
+COMMON_HINTS = ("Jarvis, Notepad, Chrome, Google Chrome, Edge, Calculator, Excel, Word, PowerPoint, Outlook, "
+                "WhatsApp, YouTube, Gmail, Downloads, Desktop, Documents, Spotify, Teams, VS Code, Cursor, "
+                "File Explorer, Settings, Task Manager, screenshot, volume, brightness")
+
+# Wake phrase (and how Whisper mishears it) at the start of a transcript.
+import re  # noqa: E402
+
+WAKE_PREFIX = re.compile(
+    r"^\W*(?:(?:hey|hi|hay|he|a|ok|okay|hello|ae)\W+)?"
+    r"(?:jarvis|jervis|javis|jarvas|jarves|jarvi|travis|service|jarvish|charvis|garvis)\b\W*", re.I)
+
+
+def strip_wake(text: str) -> str:
+    return WAKE_PREFIX.sub("", text or "").strip(" ,.!?")
+
+
+def clean_transcript(text: str, max_words: int = 40) -> str:
+    """Reject hallucinated output: hint-list echoes, a phrase repeated 3+ times, runaway length."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return ""
+    low = text.lower().strip(" .,!?")
+    if low in COMMON_HINTS.lower() or low in ("thank you", "thanks for watching", "you", "bye"):
+        return ""
+    parts = [p.strip().lower() for p in re.split(r"[,.;!?]", text) if p.strip()]
+    if parts:
+        most = max(parts.count(p) for p in set(parts))
+        if most >= 3:
+            return ""
+    words = text.split()
+    if len(words) > max_words:
+        return ""
+    return text
+
 
 class WhisperStt:
-    def __init__(self, model: str = "base", hints: str = "") -> None:
+    def __init__(self, model: str = "base", hints: str = "", languages: tuple[str, ...] = ("en", "hi")) -> None:
         self.model_name = model
-        self.hints = hints
+        # Curated hints ONLY. The full Start-menu list made Whisper hallucinate app names on noise
+        # ("Client Key Manager" x40 in the live log). `hints` is accepted for API compatibility.
+        self.hints = COMMON_HINTS
+        self.languages = tuple(languages) or ("en",)
         self._model = None
         self._lock = threading.Lock()
         self.ready = threading.Event()
@@ -115,10 +153,13 @@ class WhisperStt:
         if model is None or audio.size < RATE * 0.3:
             return "", 0.0, ""
         t0 = time.perf_counter()
-        kwargs = dict(beam_size=1, language=None, condition_on_previous_text=False, without_timestamps=True,
+        language = self._pick_language(model, audio)
+        kwargs = dict(beam_size=3, language=language, condition_on_previous_text=False, without_timestamps=True,
                       temperature=0.0,                     # single pass: no slow temperature-fallback retries
                       vad_filter=True,                     # bundled Silero VAD drops non-speech -> fewer hallucinations
-                      vad_parameters={"min_silence_duration_ms": 400})
+                      vad_parameters={"min_silence_duration_ms": 400},
+                      no_repeat_ngram_size=3, repetition_penalty=1.15,   # stop "X, X, X, X..." loops
+                      max_new_tokens=96)                                 # a spoken command is short
         if self.hints:
             kwargs["hotwords"] = self.hints[:300]          # vocabulary bias without a leak-prone sentence prompt
         try:
@@ -126,15 +167,37 @@ class WhisperStt:
         except TypeError:                                  # older faster-whisper without hotwords
             kwargs.pop("hotwords", None)
             segments, info = model.transcribe(audio, **kwargs)
-        text = " ".join(s.text.strip() for s in segments).strip()
-        if self.hints and text and text.lower() in self.hints.lower():
-            text = ""                                      # echo of the hint list, not speech
+        kept = []
+        for s in segments:
+            # Low-confidence / probably-not-speech segments are where hallucinations come from.
+            if getattr(s, "no_speech_prob", 0.0) > 0.6 or getattr(s, "avg_logprob", 0.0) < -1.0:
+                log.info("whisper dropped low-confidence segment %r (no_speech %.2f, logprob %.2f)", s.text,
+                         getattr(s, "no_speech_prob", 0.0), getattr(s, "avg_logprob", 0.0))
+                continue
+            if getattr(s, "compression_ratio", 0.0) > 2.4:
+                log.info("whisper dropped repetitive segment %r", s.text[:80])
+                continue
+            kept.append(s.text.strip())
+        text = clean_transcript(" ".join(kept))
         conf = float(getattr(info, "language_probability", 0.0) or 0.0)
         log.info("whisper heard %r (lang %s %.2f) in %.1fs", text, info.language, conf, time.perf_counter() - t0)
         # Whisper hallucinates stock phrases on near-silence; drop them.
         if text.lower().strip(" .!") in ("", "thank you", "thanks for watching", "you", "bye"):
             return "", 0.0, info.language
         return text, max(conf, 0.7), info.language
+
+    def _pick_language(self, model, audio: np.ndarray) -> str:
+        """Best of the allowed languages only (free detection said 'nn' = Norwegian for English speech)."""
+        if len(self.languages) == 1:
+            return self.languages[0]
+        try:
+            _lang, _prob, all_probs = model.detect_language(audio)
+            allowed = [(p, lang) for lang, p in all_probs if lang in self.languages]
+            if allowed:
+                return max(allowed)[1]
+        except Exception as exc:
+            log.debug("language detection failed (%s); using %s", exc, self.languages[0])
+        return self.languages[0]
 
     def listen(self, start_timeout_s: float = 8.0, max_s: float = 15.0) -> tuple[str, float, str]:
         audio = self.record(start_timeout_s=start_timeout_s, max_s=max_s)

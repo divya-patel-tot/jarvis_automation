@@ -17,6 +17,7 @@ from jarvis.config import Settings
 from jarvis.events import bus
 from jarvis.fastpath import actions
 from jarvis.fastpath.apps import AppIndex
+from jarvis.history import History
 from jarvis.memory import Memory
 from jarvis.models import Mode, RiskTier, TaskContext, TaskResult, UserRequest
 from jarvis.observer import Observer
@@ -35,12 +36,16 @@ log = logging.getLogger(__name__)
 
 
 class Orchestrator:
+    MAX_QUEUE = 5
+
     def __init__(self, settings: Settings, ask_user: Callable[[str], str] | None = None) -> None:
         self.s = settings
         self.audit = AuditLog()
         self.ws = Workspace(settings)
         self.ws.ensure()
         self.memory = Memory(self.ws.memory)
+        self.history = History()
+        self._tl = threading.local()
         self.apps = AppIndex()
         if not self.apps.entries:
             self.apps.refresh_async()
@@ -54,6 +59,10 @@ class Orchestrator:
         self.scheduler = Scheduler(settings.routines, self.run_routine)
         self.ask_user = ask_user          # synchronous clarifying-question callback (console/voice)
         self.busy = threading.Lock()
+        self._queue_lock = threading.Lock()
+        self._waiting: list[object] = []
+        self._recent: dict[str, float] = {}
+        self._cancel_queue = threading.Event()
         self.last_task: TaskContext | None = None
         self.current: TaskContext | None = None
         self._stop = threading.Event()
@@ -106,6 +115,8 @@ class Orchestrator:
     def kill_switch(self) -> None:
         """Cancel everything within ~1 s: approvals, agent run, process tree, speech."""
         t0 = time.perf_counter()
+        self._cancel_queue.set()                       # drop queued tasks too
+        threading.Timer(1.0, self._cancel_queue.clear).start()
         self.confirm.cancel_all()
         self.backends.cancel()
         self.backends.kill()
@@ -117,7 +128,23 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ entry
     def handle(self, req: UserRequest, fg_window: dict | None = None) -> TaskResult:
+        """Entry point (thread-safe; call from any thread). Every turn is saved to history."""
+        self._tl.route = None
+        self._tl.task_id = ""
+        result = self._handle(req, fg_window)
+        try:
+            route = self._tl.route
+            if req.text.strip() and result is not None and (result.spoken or result.details):
+                self.history.add(req.text, source=req.source.value, route=getattr(route, "path", ""),
+                                 intent=getattr(route, "intent", ""), status=result.status, spoken=result.spoken,
+                                 details=result.details, files=result.files_changed, task_id=self._tl.task_id)
+        except Exception:
+            log.exception("history write failed")
+        return result
+
+    def _handle(self, req: UserRequest, fg_window: dict | None = None) -> TaskResult:
         route = self.router.route(req.text)
+        self._tl.route = route
         self.audit.write("request", req.id, text=req.text, source=req.source.value, language=req.language,
                          route=route.path, intent=route.intent, confidence=route.confidence, reason=route.reason)
         if route.path == "control":
@@ -135,12 +162,45 @@ class Orchestrator:
             return self._say(TaskResult("needs_input", route.question or "Sorry, I didn't catch that."))
         if route.path == "fast":
             return self._say(self._fast(route, req))
-        if not self.busy.acquire(blocking=False):
-            return self._say(TaskResult("failed", "I'm still working on the previous task. Say stop to cancel it."))
+        # Agent tasks: FIFO queue (fast-path commands above never wait). Duplicates are merged.
+        key = route.normalized or req.text.lower().strip()
+        with self._queue_lock:
+            now = time.time()
+            self._recent = {k: t for k, t in self._recent.items() if now - t < 120}
+            if key in self._recent:
+                return self._say(TaskResult("success", "Already on it."))
+            if len(self._waiting) >= self.MAX_QUEUE:
+                return self._say(TaskResult("failed", "I have too many tasks queued; say stop to clear them."))
+            self._recent[key] = now
+            ticket = object()
+            self._waiting.append(ticket)
+            position = len(self._waiting) - (0 if self.busy.locked() else 1)
+        if position > 0:
+            bus.publish("say", text="Queued. I'll do it right after the current task." if position == 1
+                        else f"Queued as number {position}.")
         try:
-            return self._say(self._agent_task(req, fg_window))
+            while True:
+                with self._queue_lock:
+                    my_turn = self._waiting and self._waiting[0] is ticket
+                if my_turn and self.busy.acquire(timeout=0.5):
+                    with self._queue_lock:
+                        self._waiting.remove(ticket)
+                    break
+                if self._cancel_queue.is_set():
+                    with self._queue_lock:
+                        if ticket in self._waiting:
+                            self._waiting.remove(ticket)
+                    return TaskResult("cancelled", "")
+                time.sleep(0.1)
+            try:
+                return self._say(self._agent_task(req, fg_window))
+            finally:
+                self.busy.release()
         finally:
-            self.busy.release()
+            with self._queue_lock:
+                self._recent.pop(key, None)
+                if ticket in self._waiting:
+                    self._waiting.remove(ticket)
 
     def _say(self, r: TaskResult) -> TaskResult:
         if r.spoken:
@@ -272,7 +332,15 @@ class Orchestrator:
         rep = ingest.gather(ctx, self.s, fg_window)
         if rep.refused:
             return TaskResult("blocked", rep.refused)
-        extra = {"Relevant memory": "\n".join(f"- {m}" for m in self.memory.relevant(req.text)),
+        self._tl.task_id = ctx.task_id
+        try:
+            windows = "\n".join(f"- {w['title']} ({w['process']})" for w in screen.list_windows(20))
+        except Exception:
+            windows = ""
+        extra = {"Recent conversation (oldest first) - use it to resolve 'it', 'that', 'there', 'again'":
+                     self.history.as_context(8),
+                 "Open windows right now": windows,
+                 "Relevant memory": "\n".join(f"- {m}" for m in self.memory.relevant(req.text)),
                  "Foreground window when asked": json.dumps(rep.window) if rep.window else "",
                  "Notes": "\n".join(rep.notes)}
         self.ws.write_context(ctx, extra)

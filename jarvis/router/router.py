@@ -82,7 +82,7 @@ INTENTS: list[Spec] = [
     ("open_website", RiskTier.REVERSIBLE, [r"(open|go to|visit|launch) (?P<site>[\w\-]+(\.[\w\-]+)+(/\S*)?)",
                                             r"(open|go to|visit) (?P<site>youtube|gmail|google|github|wikipedia|linkedin|twitter|x|facebook|instagram|amazon|flipkart|netflix|chatgpt|maps|google maps|drive|google drive)( website)?",
                                             r"(?P<site>youtube|gmail|github|wikipedia|linkedin|facebook|instagram|amazon|flipkart|netflix) (kholo|open karo|chalao)"]),
-    ("open_app", RiskTier.REVERSIBLE, [r"(open|launch|start|run) (the |my )?(?P<app>[\w .+\-]+?)( app| application| program)?",
+    ("open_app", RiskTier.REVERSIBLE, [r"(open|launch|start|run) (up )?(the |my |a )?(?P<app>[\w .+\-]+?)( app| application| program)?( for me)?",
                                         r"(?P<app>[\w .+\-]+?) (kholo|khol do|open karo|chalu karo|chalao|start karo)"]),
 ]
 
@@ -114,21 +114,34 @@ class Router:
             return Route("control", intent="stop", confidence=1.0, normalized=n)
         if CONFIRM_WORDS.match(n):
             return Route("control", intent="confirm", confidence=1.0, normalized=n)
-        for name, tier, patterns in self._compiled:
-            for pat in patterns:
-                m = pat.match(n)
-                if not m:
-                    continue
-                route = self._build(name, tier, m.groupdict(), n)
-                if route is None:
-                    continue
-                if route.path == "fast" and name not in ("remember", "reminder", "timer") and COMPOUND.search(n):
-                    return Route("agent", reason="multi-clause request", normalized=n)
-                ov = self.overrides.get(name)
-                if ov is not None and ov > route.tier:
-                    route.tier = RiskTier(ov)
-                return route
+        for cand in self._candidates(n):
+            for name, tier, patterns in self._compiled:
+                for pat in patterns:
+                    m = pat.match(cand)
+                    if not m:
+                        continue
+                    route = self._build(name, tier, m.groupdict(), cand)
+                    if route is None:
+                        continue
+                    if route.path == "fast" and name not in ("remember", "reminder", "timer") and COMPOUND.search(cand):
+                        return Route("agent", reason="multi-clause request", normalized=n)
+                    ov = self.overrides.get(name)
+                    if ov is not None and ov > route.tier:
+                        route.tier = RiskTier(ov)
+                    return route
         return Route("agent", reason="no fast-path match", normalized=n)
+
+    NEGATIONS = {"dont", "don't", "do", "not", "never", "mat", "nahi", "na", "no", "stop", "cancel"}
+
+    def _candidates(self, n: str) -> list[str]:
+        """The text, then the text without 1-2 leading noise words (speech recognition often adds
+        a misheard word: 'service open the notepad'). Never drops a negation."""
+        words = n.split()
+        out = [n]
+        for k in (1, 2):
+            if len(words) - k >= 1 and not any(w in self.NEGATIONS for w in words[:k]):
+                out.append(" ".join(words[k:]))
+        return out
 
     # ------------------------------------------------------------------ params
     def _build(self, name: str, tier: RiskTier, g: dict[str, str], n: str) -> Route | None:

@@ -91,6 +91,33 @@ def foreground_window() -> dict:
     return window_info(_user32.GetForegroundWindow())
 
 
+def list_windows(limit: int = 20) -> list[dict]:
+    """Visible top-level windows with a title (cheap; for 'what is open' context)."""
+    if os.name != "nt":
+        return []
+    out: list[dict] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, _lp):
+        if len(out) >= limit or not _user32.IsWindowVisible(hwnd):
+            return True
+        n = _user32.GetWindowTextLengthW(hwnd)
+        if n <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        _user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value.strip()
+        if not title or title in ("Program Manager", "Settings", "Windows Input Experience"):
+            return True
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        out.append({"title": title[:120], "process": _process_name(pid.value)})
+        return True
+
+    _user32.EnumWindows(proto(cb), 0)
+    return out
+
+
 def is_sensitive(info: dict) -> bool:
     hay = f"{info.get('title', '')} {info.get('process', '')}".lower()
     return any(w in hay for w in _sensitive_list)

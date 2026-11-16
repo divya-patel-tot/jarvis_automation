@@ -1,0 +1,227 @@
+"""Continuous voice listener: openWakeWord "hey jarvis" + local Whisper command STT.
+
+One sounddevice input stream (16 kHz mono, 80 ms frames) feeds everything, so
+"Hey Jarvis open notepad" in ONE breath works: on wake we keep the last ~1.5 s
+of audio (wake phrase + the start of the command) and continue recording until
+the user stops talking; Whisper transcribes it and the wake phrase is stripped.
+
+Rules learned from live logs (2026-11-16):
+* never listen while Jarvis is speaking (it heard its own "On it" -> "say again" loops)
+* the follow-up window opens only AFTER the answer has been spoken, and an empty
+  follow-up silently returns to wake mode (no "please say it again" chatter)
+* WinRT's wake grammar rejects "hey jarvis <command>" in one breath -> openWakeWord
+"""
+
+from __future__ import annotations
+
+import collections
+import logging
+import queue
+import threading
+import time
+from typing import Callable
+
+import numpy as np
+
+from jarvis.events import bus
+from jarvis.voice.whisper_stt import RATE, WhisperStt, strip_wake
+
+log = logging.getLogger(__name__)
+
+FRAME = 1280                  # 80 ms @ 16 kHz (openWakeWord frame size)
+FRAME_S = FRAME / RATE
+
+
+def _speaking() -> bool:
+    try:
+        from jarvis.voice.windows_speech import SPEAKING
+
+        return SPEAKING.is_set()
+    except Exception:
+        return False
+
+
+class AudioListener:
+    def __init__(self, on_utterance: Callable[[str, float], None], whisper: WhisperStt,
+                 wake_threshold: float = 0.5, follow_up_s: float = 6.0, max_utterance_s: float = 15.0,
+                 end_silence_s: float = 0.8, command_start_timeout_s: float = 5.0) -> None:
+        self.on_utterance = on_utterance
+        self.whisper = whisper
+        self.wake_threshold = wake_threshold
+        self.follow_up_s = follow_up_s
+        self.max_utterance_s = max_utterance_s
+        self.end_silence_s = end_silence_s
+        self.command_start_timeout_s = command_start_timeout_s
+        self.paused = threading.Event()
+        self.ready = threading.Event()
+        self.error = ""
+        self.last_language = ""
+        self._ptt = threading.Event()
+        self._stop = threading.Event()
+        self._frames: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=400)
+        self._ring: collections.deque = collections.deque(maxlen=int(1.5 / FRAME_S))   # pre-roll 1.5 s
+        self._noise = 0.004
+        self._followup_pending = False
+        self._followup_until = 0.0
+        self._oww = None
+        bus.subscribe("result", lambda e: self._on_result())
+
+    # ------------------------------------------------------------------ public
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="voice", daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def push_to_talk(self) -> None:
+        log.info("push-to-talk pressed")
+        bus.publish("voice_status", text="Push-to-talk: speak now")
+        self._ptt.set()
+
+    def _on_result(self) -> None:
+        self._followup_pending = True   # opened once TTS has finished speaking the answer
+
+    # ------------------------------------------------------------------ setup
+    def _load_wake_model(self):
+        import openwakeword
+        from openwakeword.model import Model
+
+        try:
+            return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        except Exception:
+            openwakeword.utils.download_models(["hey_jarvis"])
+            return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+
+    def _run(self) -> None:
+        import sounddevice as sd
+
+        try:
+            bus.publish("voice_status", text="Voice starting...")
+            self._oww = self._load_wake_model()
+            self.whisper.ready.wait(60)
+            dev = sd.query_devices(kind="input")
+            mic = dev.get("name", "default")
+        except Exception as exc:
+            self.error = f"Voice unavailable: {exc}"
+            log.exception("voice setup failed")
+            bus.publish("error", text=self.error)
+            self.ready.set()
+            return
+
+        def cb(indata, frames, t, status):  # noqa: ARG001 - sounddevice callback signature
+            try:
+                self._frames.put_nowait(indata[:, 0].copy())
+            except queue.Full:
+                pass
+
+        while not self._stop.is_set():
+            try:
+                with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME, callback=cb):
+                    msg = f"Voice ready (mic: {mic}). Say 'Hey Jarvis' + your request, or press Ctrl+Alt+Space."
+                    log.info(msg)
+                    bus.publish("voice_status", text=msg)
+                    self.ready.set()
+                    self._loop()
+            except Exception as exc:
+                log.warning("audio stream error (%s); reopening in 2 s", exc)
+                bus.publish("voice_status", text=f"Mic error: {exc}. Retrying...")
+                time.sleep(2)
+
+    # ------------------------------------------------------------------ main loop
+    def _next(self, timeout: float = 0.5) -> np.ndarray | None:
+        try:
+            return self._frames.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _drain(self) -> None:
+        while not self._frames.empty():
+            try:
+                self._frames.get_nowait()
+            except queue.Empty:
+                break
+        self._ring.clear()
+        if self._oww is not None:
+            self._oww.reset()
+
+    def _loop(self) -> None:
+        bus.publish("state", state="idle")
+        while not self._stop.is_set():
+            frame = self._next()
+            if frame is None:
+                continue
+            if self.paused.is_set() or _speaking():
+                self._drain()                      # never listen to ourselves
+                continue
+            now = time.monotonic()
+            if self._followup_pending:
+                self._followup_pending = False
+                self._followup_until = now + self.follow_up_s
+            rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+            self._ring.append(frame)
+            if self._ptt.is_set():
+                self._ptt.clear()
+                self._capture(preroll=False, reason="push-to-talk")
+                continue
+            if now < self._followup_until and rms > self._threshold():
+                self._followup_until = 0.0
+                self._capture(preroll=True, reason="follow-up", require_new_speech=False)
+                continue
+            score = float(self._oww.predict(frame).get("hey_jarvis", 0.0))
+            if score >= self.wake_threshold:
+                log.info("wake word 'hey jarvis' (score %.2f)", score)
+                self._capture(preroll=True, reason=f"wake {score:.2f}")
+                continue
+            if rms < self._threshold():               # track the noise floor on quiet frames
+                self._noise = 0.97 * self._noise + 0.03 * rms
+
+    def _threshold(self) -> float:
+        return max(self._noise * 3.0, 0.006)
+
+    # ------------------------------------------------------------------ capture
+    def _capture(self, preroll: bool, reason: str, require_new_speech: bool = True) -> None:
+        bus.publish("stop_speech")
+        bus.publish("earcon")
+        bus.publish("state", state="listening")
+        bus.publish("voice_status", text="Listening... speak your request")
+        try:
+            import winsound
+
+            winsound.MessageBeep(0x40)       # non-blocking "I'm listening" cue
+        except Exception:
+            pass
+        chunks = list(self._ring) if preroll else []
+        thr = self._threshold()
+        heard_new = not require_new_speech
+        silent = 0.0
+        t0 = time.monotonic()
+        while not self._stop.is_set():
+            frame = self._next(timeout=1.0)
+            if frame is None:
+                break
+            chunks.append(frame)
+            rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+            elapsed = time.monotonic() - t0
+            if rms > thr:
+                heard_new, silent = True, 0.0
+            else:
+                silent += FRAME_S
+            if heard_new and silent >= self.end_silence_s:
+                break
+            if not heard_new and elapsed > self.command_start_timeout_s:
+                break
+            if elapsed > self.max_utterance_s:
+                break
+        audio = (np.concatenate(chunks).astype(np.float32) / 32768.0) if chunks else np.zeros(0, np.float32)
+        self._drain()
+        bus.publish("state", state="thinking")
+        text, conf, lang = self.whisper.transcribe(audio)
+        command = strip_wake(text)
+        log.info("voice %s: heard %r -> command %r", reason, text, command)
+        if not command:
+            bus.publish("voice_status", text="Yes? Say 'Hey Jarvis' and your request.")
+            bus.publish("state", state="idle")
+            return
+        self.last_language = lang
+        bus.publish("transcript", text=command, final=True, confidence=conf)
+        threading.Thread(target=self.on_utterance, args=(command, conf), name="voice-cmd", daemon=True).start()

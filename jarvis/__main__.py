@@ -151,7 +151,9 @@ def run(voice: bool) -> int:
     orch.start()
 
     def handle_async(text: str, source: Source, conf: float = 1.0) -> None:
-        lang = "hi" if any(w in text.lower() for w in (" karo", " kholo", " batao", "kya ", " hai")) else "en"
+        heard = getattr(listener, "last_language", "") if source == Source.VOICE else ""
+        lang = heard or ("hi" if any(w in f" {text.lower()} " for w in (" karo", " kholo", " batao", " kya ", " hai "))
+                         else "en")
         req = UserRequest(text=text, source=source, confidence=conf, language=lang)
         if source == Source.VOICE and conf < 0.6 and not orch.confirm.pending():
             _print(f"Jarvis: Did you mean \"{text}\"? (low confidence - please type or repeat)")
@@ -160,7 +162,26 @@ def run(voice: bool) -> int:
         threading.Thread(target=orch.handle, args=(req,), daemon=True).start()
 
     listener = None
-    if voice and s.voice.enabled:
+    if voice and s.voice.enabled and s.voice.wake_engine == "openwakeword":
+        try:
+            import faster_whisper  # noqa: F401  (heavy imports on the main thread, never racing other threads)
+            import openwakeword  # noqa: F401
+
+            from jarvis.voice.listener import AudioListener
+            from jarvis.voice.whisper_stt import WhisperStt
+
+            whisper = WhisperStt(s.voice.whisper_model, languages=tuple(s.voice.languages or ["en"]))
+            whisper.preload_async()
+            listener = AudioListener(lambda t, c: handle_async(t, Source.VOICE, c), whisper,
+                                     wake_threshold=s.voice.wake_threshold, follow_up_s=s.voice.follow_up_window_s,
+                                     max_utterance_s=s.voice.max_utterance_s)
+            listener.start()
+            _print("Voice: say 'Hey Jarvis' + your request in one go (or press Ctrl+Alt+Space).")
+        except Exception as exc:
+            _print(f"(openWakeWord voice unavailable: {exc}; using Windows speech)")
+            log.exception("openwakeword listener failed")
+            listener = None
+    if voice and s.voice.enabled and listener is None:
         try:
             from jarvis.voice.windows_speech import WindowsListener
 

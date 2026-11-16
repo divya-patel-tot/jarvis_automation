@@ -129,7 +129,7 @@ licensing. It is a single-user personal desktop app. Do not add any of these.
 
 ---
 
-## Phase 2 — Voice polish (live tuning) · 1 day
+## Phase 2 — Voice polish (live tuning) · 0.5 day — mostly DONE (openWakeWord + Whisper listener `jarvis/voice/listener.py`, task queue, SQLite history). Remaining: tune `wake_threshold` / VAD from live logs, spoken approval prompt, barge-in while speaking.
 1. Log-driven tuning: speak 20 commands, read `%LOCALAPPDATA%\Jarvis\logs\jarvis.jsonl` (`wake heard`,
    `whisper heard`, `whisper: speech started`). Tune `wake_confidence`, VAD threshold/`silence_s` in
    `WhisperStt.record`, follow-up window.
