@@ -42,6 +42,9 @@ def _speaking() -> bool:
 
 
 class AudioListener:
+    STALL_S = 2.0               # no mic audio for this long -> reopen the stream
+    _last_frame = 0.0
+
     def __init__(self, on_utterance: Callable[[str, float], None], whisper: WhisperStt,
                  wake_threshold: float = 0.5, follow_up_s: float = 6.0, max_utterance_s: float = 15.0,
                  end_silence_s: float = 0.8, command_start_timeout_s: float = 5.0) -> None:
@@ -109,19 +112,26 @@ class AudioListener:
             return
 
         def cb(indata, frames, t, status):  # noqa: ARG001 - sounddevice callback signature
+            self._last_frame = time.monotonic()
             try:
                 self._frames.put_nowait(indata[:, 0].copy())
             except queue.Full:
                 pass
 
+        first = True
         while not self._stop.is_set():
             try:
+                self._last_frame = time.monotonic()
                 with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME, callback=cb):
-                    msg = f"Voice ready (mic: {mic}). Say 'Hey Jarvis' + your request, or press Ctrl+Alt+Space."
-                    log.info(msg)
-                    bus.publish("voice_status", text=msg)
+                    if first:
+                        msg = f"Voice ready (mic: {mic}). Say 'Hey Jarvis' + your request, or press Ctrl+Alt+Space."
+                        log.info(msg)
+                        bus.publish("voice_status", text=msg)
+                        first = False
+                    else:
+                        log.info("mic stream reopened")
                     self.ready.set()
-                    self._loop()
+                    self._loop()      # returns when the stream stalls -> reopen
             except Exception as exc:
                 log.warning("audio stream error (%s); reopening in 2 s", exc)
                 bus.publish("voice_status", text=f"Mic error: {exc}. Retrying...")
@@ -149,6 +159,11 @@ class AudioListener:
         while not self._stop.is_set():
             frame = self._next()
             if frame is None:
+                # Watchdog: the Jabra/USB capture stream silently stopped delivering audio after TTS
+                # played (live log 11:02:33, py-spy: voice thread waiting on an empty queue). Reopen it.
+                if time.monotonic() - self._last_frame > self.STALL_S:
+                    log.warning("mic stream stalled (no audio for %.0fs) - reopening", self.STALL_S)
+                    return
                 continue
             if self.paused.is_set() or _speaking():
                 self._drain()                      # never listen to ourselves
@@ -198,6 +213,8 @@ class AudioListener:
         while not self._stop.is_set():
             frame = self._next(timeout=1.0)
             if frame is None:
+                if time.monotonic() - self._last_frame > self.STALL_S:
+                    log.warning("mic stream stalled during capture")
                 break
             chunks.append(frame)
             rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))

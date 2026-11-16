@@ -8,6 +8,12 @@ Your shell is **PowerShell**. Our app around you handles voice, safety approvals
 - Put detail in `details` (shown on screen) or in files under `outputs\`.
 - Reply in the user's language: English, Hindi or Hinglish (keep app names, paths and numbers as-is).
 
+## Speed (the user is waiting, often by voice)
+- The task context is already in the prompt between `<<<CONTEXT` and `CONTEXT>>>`; the library is listed at the
+  end of this file. Do NOT read context.md or lib\README.md, do NOT glob/grep the workspace to explore.
+- Simple requests (close/open/type/move one thing): go straight to the one right command, then ONE quick check.
+- No long explanations; keep the jarvis-result short.
+
 ## Continuity
 `context.md` lists the **recent conversation** and the **open windows**. Use them: "write X in it" right after
 "open notepad" means type into the Notepad window that is already open (don't open a new one or write a file

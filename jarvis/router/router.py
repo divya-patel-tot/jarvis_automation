@@ -76,6 +76,8 @@ INTENTS: list[Spec] = [
     ("new_topic", RiskTier.READ_ONLY, [r"(new topic|start over|new conversation|reset (the )?conversation|forget (this|the) conversation)"]),
     ("undo", RiskTier.CONSEQUENTIAL, [r"undo( (that|it|the last (one|action|task)|last))?", r"(wapas|vapas) karo", r"revert( that)?"]),
     ("help", RiskTier.READ_ONLY, [r"(help|what can you do|tum kya kar sakte ho)"]),
+    ("close_app", RiskTier.REVERSIBLE, [r"(close|quit|exit|shut) (down )?(the |my |all )?(?P<app>[\w .+\-]+?)( app| application| program| windows?)?( for me)?",
+                                         r"(?P<app>[\w .+\-]+?) (band karo|band kar do|close karo|close kar do|bandh karo)"]),
     ("open_folder", RiskTier.REVERSIBLE, [r"(open|show|go to) (my |the )?(?P<folder>[\w ]+?) folder", r"(?P<folder>[\w ]+?) folder (kholo|dikhao|open karo)",
                                            r"(open|show) (my |the )?(?P<folder>downloads|documents|desktop|pictures|music|videos)",
                                            r"(?P<folder>downloads|documents|desktop|pictures|music|videos) (kholo|dikhao)"]),
@@ -216,6 +218,15 @@ class Router:
                              confidence=conf)
             r.params.update(app=entry.name, target=entry.target, kind=entry.kind)
             r.confidence = conf
+        elif name == "close_app":
+            app = (g.get("app") or "").strip()
+            app = re.sub(r"^(the|my)\s+", "", app)
+            from jarvis.fastpath.actions import PROCESS_ALIASES
+
+            # Only well-known apps on the fast path; anything else ("close the deal email") -> agent.
+            if not app or COMPOUND.search(app) or app not in PROCESS_ALIASES:
+                return None
+            r.params["app"] = app
         elif name == "remember":
             fact = (g.get("fact") or "").strip()
             if len(fact) < 3:

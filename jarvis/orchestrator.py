@@ -231,6 +231,7 @@ class Orchestrator:
                 "maximize": lambda: actions.snap("up"), "show_desktop": lambda: actions.snap("show_desktop"),
                 "read_clipboard": lambda: actions.read_clipboard(self.s.private_mode),
                 "open_app": lambda: actions.open_app(p["target"], p["kind"], p["app"]),
+                "close_app": lambda: actions.close_app(p["app"]),
                 "open_folder": lambda: actions.open_folder(p["folder"], p.get("path"), self.ws.root),
                 "open_website": lambda: actions.open_website(p["url"]),
             }.get(i)
@@ -385,7 +386,8 @@ class Orchestrator:
     def _act(self, ctx: TaskContext, session: str) -> TaskResult:
         """Full autonomy: run the whole request directly; confirm only held deletions."""
         bus.publish("state", state="acting")
-        r = self._run_phase(ctx, Mode.DIRECT, prompts.act_prompt(ctx), session, strong=True)
+        # Fast model for direct actions (most are 1-3 tool calls); planning keeps the strong model.
+        r = self._run_phase(ctx, Mode.DIRECT, prompts.act_prompt(ctx), session, strong=False)
         held = [b for b in self._last_blocked if DELETE_MARK in str(b.get("reason", ""))]
         if not held:
             return r

@@ -177,6 +177,68 @@ def open_app(target: str, kind: str, name: str) -> ActionResult:
     return ActionResult(True, f"Opening {name}.", data={"target": target})
 
 
+PROCESS_ALIASES = {
+    "notepad": ["notepad"], "chrome": ["chrome"], "google chrome": ["chrome"], "edge": ["msedge"],
+    "microsoft edge": ["msedge"], "browser": ["msedge", "chrome", "firefox"], "firefox": ["firefox"],
+    "calculator": ["calculatorapp", "calculator"], "calc": ["calculatorapp", "calculator"],
+    "word": ["winword"], "excel": ["excel"], "powerpoint": ["powerpnt"], "ppt": ["powerpnt"],
+    "outlook": ["outlook", "olk"], "teams": ["ms-teams", "teams"], "spotify": ["spotify"],
+    "vs code": ["code"], "vscode": ["code"], "visual studio code": ["code"], "cursor": ["cursor"],
+    "paint": ["mspaint"], "whatsapp": ["whatsapp"], "zoom": ["zoom"], "slack": ["slack"],
+    "file explorer": ["explorer"], "explorer": ["explorer"], "task manager": ["taskmgr"],
+    "settings": ["systemsettings"], "photos": ["photos", "microsoft.photos"], "vlc": ["vlc"],
+}
+NEVER_CLOSE = {"python", "pythonw", "py", "cursor-sdk-bridge", "csrss", "winlogon", "lsass", "services",
+               "svchost", "dwm", "system", "smss", "wininit", "conhost"}
+SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
+WM_CLOSE = 0x0010
+
+
+def close_app(name: str) -> ActionResult:
+    """Gracefully close an app's windows (WM_CLOSE, like clicking X - unsaved-work prompts still show)."""
+    import psutil
+    from ctypes import wintypes
+
+    q = name.lower().strip()
+    wanted = set(PROCESS_ALIASES.get(q, [q.replace(" ", "")]))
+    user32 = ctypes.windll.user32
+    targets: list[tuple[int, str]] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, _lp):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        if cls.value in SHELL_CLASSES:
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, title, n + 1)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        try:
+            proc = psutil.Process(pid.value).name().lower().removesuffix(".exe")
+        except psutil.Error:
+            return True
+        if proc in NEVER_CLOSE:
+            return True
+        if proc in wanted or (proc == "applicationframehost" and q in title.value.lower()):
+            targets.append((hwnd, title.value))
+        return True
+
+    user32.EnumWindows(proto(cb), 0)
+    if not targets:
+        return ActionResult(False, f"{name.capitalize()} isn't open.")
+    for hwnd, _title in targets:
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    n = len(targets)
+    return ActionResult(True, f"Closing {name}." if n == 1 else f"Closing {n} {name} windows.",
+                        details="\n".join(t for _, t in targets))
+
+
 def open_folder(folder: str, path: str | None, workspace: Path) -> ActionResult:
     known = paths.known_folders()
     if path:

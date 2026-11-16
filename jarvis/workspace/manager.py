@@ -64,7 +64,13 @@ class Workspace:
 
     def _write_rules(self) -> None:
         text = (TEMPLATES / "AGENTS.md").read_text(encoding="utf-8")
-        (self.root / "AGENTS.md").write_text(text, encoding="utf-8")
+        # Library table inline: the agent used to spend a tool call reading lib\README.md every task.
+        manifest = json.loads((CAPABILITIES / "manifest.json").read_text(encoding="utf-8"))
+        rows = ["", "## Capability library (already installed in lib\\ - do not read README, use directly)",
+                "| script | tier | what | args |", "|---|---|---|---|"]
+        rows += [f"| lib\\{i['file']} | {i['tier']} | {i['description']} | `{i['usage']}` |"
+                 for _, i in sorted(manifest.items())]
+        (self.root / "AGENTS.md").write_text(text.rstrip() + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
 
     def _install_library(self) -> None:
         if self.lib.exists():
