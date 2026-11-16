@@ -20,22 +20,20 @@ licensing. It is a single-user personal desktop app. Do not add any of these.
 
 | Area | Status | Where |
 |---|---|---|
-| Cursor SDK backend (Win + Py3.11 bridge shim, Job Object) | ✅ tested with real agent | `jarvis/backend/sdk_backend.py`, `sdk_bridge_win.py` |
-| CLI backend (fallback) | ⚠️ written, **untested** (CLI not installed) | `jarvis/backend/cli_backend.py` |
-| Backend manager: probe, fallback, model routing from discovery | ✅ | `jarvis/backend/manager.py` |
-| Pre-execution policy hook (`preToolUse`, `beforeShellExecution`, `beforeReadFile`, `beforeMCPExecution`) | ✅ blocks before execution | `jarvis/hooks/policy_hook.py`, `jarvis/safety/policy.py` |
-| **Full autonomy (default)**: one command → done; only deletes ask once | ✅ e2e PASS (create = 0 approvals, delete = 1) | `orchestrator._act`, `policy._check_shell_full` |
-| Safe autonomy: plan → approve → execute | ✅ e2e PASS | `orchestrator._plan_then_execute` |
-| Fast path (volume, apps, folders, sites, time, battery, timers, reminders, media, snap, memory, undo) | ✅ | `jarvis/router/*`, `jarvis/fastpath/*` |
-| Capability library (find/zip/copy/move/recycle/launch/system/clipboard/notify/extract_text/web_text/**send_mail**) | ✅ | `jarvis/capabilities/` (copied to `<workspace>\lib` at startup) |
-| Observer: budgets, timeouts, hook-decision audit, kill on violation | ✅ | `jarvis/observer.py` |
-| Kill switch (Ctrl+Alt+K / "stop") ~0.4 s, kills whole process tree | ✅ | `orchestrator.kill_switch` |
-| Hash-chained redacted audit log | ✅ | `jarvis/audit.py` |
-| Memory, scheduler (timers/reminders/routines), undo (move/recycle) | ✅ | `memory.py`, `scheduler.py`, `undo.py` |
-| Screen/UIA text, clipboard, documents, web ingestion + taint | ✅ (UIA text lightly tested) | `jarvis/senses/*` |
-| Voice: offline WinRT wake word + **local Whisper** command STT (1.6 s/command) + SAPI TTS | ✅ wake verified, Whisper verified on synthesized speech; needs live tuning | `jarvis/voice/windows_speech.py`, `whisper_stt.py` |
-| Console palette + `doctor` + `set-key` + `set-mail` + `verify-audit` | ✅ | `jarvis/__main__.py` |
-| Unit tests (83) + e2e (`tests.e2e_smoke`, `tests.e2e_autonomy`) | ✅ | `tests/` |
+| Cursor SDK backend (Win + Py3.11 bridge shim, Job Object), model routing, CLI fallback (untested) | ✅ | `jarvis/backend/*` |
+| Pre-execution policy hook on every agent tool call | ✅ | `jarvis/hooks/policy_hook.py`, `jarvis/safety/policy.py` |
+| **Full autonomy**: one command → done; only deletions ask once; verified-only success | ✅ e2e | `orchestrator._act`, `_enforce_truth` |
+| Instant commands (open/close apps, volume, brightness, time, battery, screenshots, media, timers, reminders, memory, undo) | ✅ < 0.1 s | `jarvis/router/*`, `jarvis/fastpath/*` |
+| **Desktop control for any app / browser tab** (UI Automation custom tools: windows, focus, read, click, type, keys, wait_for_text, screenshot) | ✅ e2e | `jarvis/desktop/tools.py` |
+| Capability library (files, zip, recycle, launch, system info, documents, web text, send_mail) | ✅ | `jarvis/capabilities/` |
+| Voice: openWakeWord "hey jarvis" + Whisper `base.en` (English, ~0.9 s) + SAPI TTS, barge-in, WASAPI + stall/silence watchdog | ✅ live | `jarvis/voice/listener.py`, `whisper_stt.py`, `windows_speech.py` |
+| FIFO agent queue, duplicate merge, mid-task amendments ("actually…"), parallel instant commands | ✅ | `orchestrator._handle` |
+| Scheduling any command ("… at 12 PM", "after 5 hours …"), list/cancel, persisted | ✅ e2e | `scheduler.py`, `router.split_schedule` |
+| SQLite conversation history + open windows + installed apps in agent context; sound-alike app names | ✅ | `history.py`, `fastpath/apps.py` |
+| Observer (budgets, timeouts, audit), kill switch ~0.4 s, hash-chained audit log | ✅ | `observer.py`, `audit.py` |
+| Console palette + `doctor` / `set-key` / `set-mail` / `verify-audit` | ✅ | `jarvis/__main__.py` |
+| Tests: 151 unit + `tests.e2e_smoke`, `tests.e2e_autonomy` | ✅ | `tests/` |
+| **Desktop window UI + tray + toggles** | ❌ **Phase 1 (next)** | `jarvis/ui/` (new) |
 
 ### Hard facts / rules (breaking these caused real bugs)
 1. **Python 3.11 only.** Use `.venv\Scripts\python.exe`. Never edit `site-packages` (the SDK bug is worked around in `sdk_bridge_win.py`).
@@ -49,6 +47,13 @@ licensing. It is a single-user personal desktop app. Do not add any of these.
 9. Only ONE Jarvis process may run (mic mutex `Local\JarvisVoiceMic`). The UI must enforce single instance.
 10. Never touch Qt widgets from non-GUI threads — use Qt signals (see Phase 1 approach).
 11. Edit files with UTF-8 tools; PowerShell `Get-Content`/`Set-Content` round-trips have corrupted Markdown here (mojibake).
+12. Desktop tools: all UIA calls on ONE worker thread; `uiautomation` 2.x uses `GetPattern(PatternId.X)` (no
+    `Is*PatternAvailable()`); never type unless the target window is verifiably in front.
+13. Custom SDK tools reach the hook as `MCP:<name>` / `<name>` and the stream as name `mcp` with
+    `args.toolName` — already normalized in `sdk_backend._normalize`.
+14. Never import inside a logging handler (startup deadlock, D-012); heavy imports (`faster_whisper`,
+    `openwakeword`) on the main thread before threads start.
+15. Voice is English-only (`base.en`, `languages=["en"]`) by user decision.
 
 ---
 
@@ -64,7 +69,7 @@ licensing. It is a single-user personal desktop app. Do not add any of these.
   `activity`, `agent_text`, `approval_request`, `approval_closed`, `result`, `say`, `notify`, `error`,
   `voice_status`, `usage`). It subscribes to `jarvis.events.bus` and `emit`s; Qt delivers to widgets via
   QueuedConnection. **No widget code runs in bus threads.**
-- `jarvis/ui/controller.py`: owns the `Orchestrator`, `WindowsListener` (+ `WhisperStt`), `Tts`, hotkeys — move the
+- `jarvis/ui/controller.py`: owns the `Orchestrator`, `AudioListener` (+ `WhisperStt`), `Tts`, hotkeys — move the
   wiring that is currently inside `run()` in `__main__.py` into a reusable `JarvisRuntime` class
   (`start()`, `stop()`, `submit(text, source)`, `set_listening(bool)`, `kill()`), used by BOTH console and UI.
 - Single instance: named mutex `Local\JarvisApp`; a second launch brings the existing window to front
