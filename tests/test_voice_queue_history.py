@@ -18,6 +18,9 @@ from jarvis.voice.whisper_stt import clean_transcript, strip_wake
     ("ok jarvis what time is it?", "what time is it"),
     ("Hey Jarvis.", ""),
     ("open notepad", "open notepad"),
+    ("Edge, Jarvis. Can you open Teams?", "Can you open Teams"),     # live log 11:09
+    ("A Jarvis, close the notepad", "close the notepad"),
+    ("open the jarvis folder in documents", "open the jarvis folder in documents"),   # jarvis later = content
 ])
 def test_strip_wake(heard, command):
     assert strip_wake(heard) == command
@@ -37,7 +40,8 @@ class _Apps:
 
 
 @pytest.mark.parametrize("text", ["service open the notepad", "uh open notepad", "please open the notepad",
-                                  "open up the notepad", "open notepad for me"])
+                                  "open up the notepad", "open notepad for me", "edge jarvis can you open notepad",
+                                  "can you open notepad"])
 def test_noisy_prefix_still_fast(text):
     r = Router(app_index=_Apps()).route(text)
     assert r.path == "fast" and r.intent == "open_app", r

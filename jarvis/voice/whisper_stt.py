@@ -35,8 +35,25 @@ WAKE_PREFIX = re.compile(
     r"(?:jarvis|jervis|javis|jarvas|jarves|jarvi|travis|service|jarvish|charvis|garvis)\b\W*", re.I)
 
 
+WAKE_WORD = re.compile(r"\b(jarvis|jervis|javis|jarvas|jarves|jarvish|charvis|garvis)\b[\s,.!?:]*", re.I)
+
+
 def strip_wake(text: str) -> str:
-    return WAKE_PREFIX.sub("", text or "").strip(" ,.!?")
+    """Drop the wake phrase. Whisper renders "Hey" as anything ("Edge, Jarvis", "A Jarvis"), so when a
+    Jarvis-word appears within the first 3 words, everything up to and including it is removed."""
+    text = (text or "").strip()
+    m = WAKE_WORD.search(text)
+    if m:
+        before = [w.strip(" ,.!?").lower() for w in text[:m.start()].split()]
+        # "open the jarvis folder" -> 'jarvis' is content, not the wake word.
+        if len(before) <= 2 and not any(w in COMMAND_WORDS for w in before):
+            return text[m.end():].strip(" ,.!?")
+    return WAKE_PREFIX.sub("", text).strip(" ,.!?")
+
+
+COMMAND_WORDS = {"open", "close", "start", "launch", "run", "create", "make", "delete", "remove", "show", "find",
+                 "search", "send", "play", "write", "read", "copy", "move", "rename", "the", "my", "in", "to", "of",
+                 "kholo", "band", "dikhao", "batao", "set", "turn"}
 
 
 def clean_transcript(text: str, max_words: int = 40) -> str:

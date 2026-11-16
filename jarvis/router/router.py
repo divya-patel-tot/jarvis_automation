@@ -143,6 +143,12 @@ class Router:
         for k in (1, 2):
             if len(words) - k >= 1 and not any(w in self.NEGATIONS for w in words[:k]):
                 out.append(" ".join(words[k:]))
+        # Polite prefixes may only appear after the noise ("edge jarvis can you open teams").
+        polite = re.compile(r"^(jarvis\s+)?(please|plz|can you|could you|would you|will you|kindly|zara|jara)\s+")
+        for c in list(out):
+            stripped = polite.sub("", c)
+            if stripped != c and stripped not in out:
+                out.append(stripped)
         return out
 
     # ------------------------------------------------------------------ params

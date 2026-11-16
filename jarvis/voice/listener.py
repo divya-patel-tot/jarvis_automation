@@ -43,7 +43,10 @@ def _speaking() -> bool:
 
 class AudioListener:
     STALL_S = 2.0               # no mic audio for this long -> reopen the stream
+    SILENT_RMS = 0.0015         # below this a frame is "digital silence" (a live room is ~0.002-0.02)
+    SILENT_REOPEN_S = 15.0      # this long without any sound -> reopen (dead-stream safety net)
     _last_frame = 0.0
+    _last_loud = 0.0
 
     def __init__(self, on_utterance: Callable[[str, float], None], whisper: WhisperStt,
                  wake_threshold: float = 0.5, follow_up_s: float = 6.0, max_utterance_s: float = 15.0,
@@ -122,7 +125,10 @@ class AudioListener:
         while not self._stop.is_set():
             try:
                 self._last_frame = time.monotonic()
-                with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME, callback=cb):
+                self._last_loud = time.monotonic()
+                device, extra = self._pick_device(sd)
+                with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME, callback=cb,
+                                    device=device, extra_settings=extra):
                     if first:
                         msg = f"Voice ready (mic: {mic}). Say 'Hey Jarvis' + your request, or press Ctrl+Alt+Space."
                         log.info(msg)
@@ -136,6 +142,19 @@ class AudioListener:
                 log.warning("audio stream error (%s); reopening in 2 s", exc)
                 bus.publish("voice_status", text=f"Mic error: {exc}. Retrying...")
                 time.sleep(2)
+
+    @staticmethod
+    def _pick_device(sd):
+        """Prefer WASAPI (reports device changes as errors). The MME default stream kept running but
+        delivered digital silence after Teams reconfigured the Jabra headset (live 11:10, py-spy rms 0.0003
+        while a fresh stream heard rms 0.02)."""
+        try:
+            for api in sd.query_hostapis():
+                if "wasapi" in api["name"].lower() and api.get("default_input_device", -1) >= 0:
+                    return api["default_input_device"], sd.WasapiSettings(auto_convert=True)
+        except Exception as exc:
+            log.debug("WASAPI not available (%s); using default device", exc)
+        return None, None
 
     # ------------------------------------------------------------------ main loop
     def _next(self, timeout: float = 0.5) -> np.ndarray | None:
@@ -173,6 +192,13 @@ class AudioListener:
                 self._followup_pending = False
                 self._followup_until = now + self.follow_up_s
             rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+            if rms > self.SILENT_RMS:
+                self._last_loud = now
+            elif now - self._last_loud > self.SILENT_REOPEN_S:
+                # Safety net for a stream that runs but is dead-silent; reopening during silence costs ~0.1 s.
+                log.debug("mic near-silent for %.0fs - reopening stream (guards against dead streams)",
+                          self.SILENT_REOPEN_S)
+                return
             self._ring.append(frame)
             if self._ptt.is_set():
                 self._ptt.clear()
