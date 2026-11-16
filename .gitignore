@@ -1,0 +1,30 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Secrets - the Cursor API key lives in Windows Credential Manager / user env, never here
+.env
+.env.*
+*.key
+*.pem
+*_api_key*
+secrets*.json
+
+# Local runtime artefacts
+spikes/results/*.json
+!spikes/results/.gitkeep
+*.log
+*.jsonl
+*.tmp
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
