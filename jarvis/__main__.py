@@ -2,6 +2,7 @@
 
     python -m jarvis               run (console palette + voice + global kill hotkey)
     python -m jarvis --no-voice    typed only
+    python -m jarvis ui            desktop overlay (no console with pythonw)
     python -m jarvis doctor        health check of every component
     python -m jarvis set-key       store the Cursor API key (Credential Manager)
     python -m jarvis verify-audit  check the audit hash chain
@@ -10,49 +11,20 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import getpass
 import json
-import logging
 import os
 import sys
-import threading
-from ctypes import wintypes
 
 from jarvis import config, logging_setup, paths
-from jarvis.events import bus
-from jarvis.models import Source, UserRequest
-
-log = logging.getLogger("jarvis")
 
 
 def _print(msg: str) -> None:
     print(msg, flush=True)
 
 
-# --------------------------------------------------------------------------- hotkeys
-def start_hotkeys(on_kill, on_ptt) -> None:
-    """Global hotkeys via RegisterHotKey: Ctrl+Alt+K = kill switch, Ctrl+Alt+Space = push-to-talk."""
-    def loop() -> None:
-        user32 = ctypes.windll.user32
-        MOD_ALT, MOD_CONTROL, WM_HOTKEY = 0x1, 0x2, 0x0312
-        ok1 = user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT, 0x4B)    # K
-        ok2 = user32.RegisterHotKey(None, 2, MOD_CONTROL | MOD_ALT, 0x20)    # Space
-        if not ok1:
-            log.warning("could not register Ctrl+Alt+K kill hotkey (in use?)")
-        if not ok2:
-            log.warning("could not register Ctrl+Alt+Space push-to-talk (in use?)")
-        else:
-            log.info("hotkeys: Ctrl+Alt+K = stop, Ctrl+Alt+Space = push-to-talk")
-        msg = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            if msg.message == WM_HOTKEY:
-                (on_kill if msg.wParam == 1 else on_ptt)()
-    threading.Thread(target=loop, name="hotkeys", daemon=True).start()
-
-
 # --------------------------------------------------------------------------- doctor
-def doctor() -> int:
+def doctor_checks() -> list[tuple[str, bool, str]]:
     from jarvis.audit import AuditLog
     from jarvis.backend.manager import BackendManager
     from jarvis.secrets import get_api_key
@@ -79,6 +51,11 @@ def doctor() -> int:
     from jarvis.voice.windows_speech import voice_health
 
     checks.extend(voice_health())
+    return checks
+
+
+def doctor() -> int:
+    checks = doctor_checks()
     width = max(len(c[0]) for c in checks)
     for name, good, detail in checks:
         _print(f"  [{'OK ' if good else '!! '}] {name.ljust(width)}  {detail}")
@@ -87,129 +64,11 @@ def doctor() -> int:
 
 # --------------------------------------------------------------------------- console app
 def run(voice: bool) -> int:
-    from jarvis.orchestrator import Orchestrator
+    from jarvis.models import Source
+    from jarvis.runtime import JarvisRuntime
 
-    s = config.load()
-    answers: "list[str]" = []
-    answer_ready = threading.Event()
-    waiting_question = threading.Event()
-
-    def ask_user(question: str) -> str:
-        _print(f"\nJarvis asks: {question}")
-        bus.publish("say", text=question)
-        waiting_question.set()
-        answer_ready.clear()
-        answer_ready.wait(120)
-        waiting_question.clear()
-        return answers.pop() if answers else ""
-
-    orch = Orchestrator(s, ask_user=ask_user)
-
-    bus.subscribe("activity", lambda e: _print(f"   · {e['text']}") if e.get("text") else None)
-    bus.subscribe("error", lambda e: _print(f"!! {e['text']}"))
-    bus.subscribe("notify", lambda e: _print(f"[{e.get('title')}] {e.get('text')}"))
-    bus.subscribe("transcript", lambda e: _print(f"\nYou (voice): {e['text']}  (conf {e.get('confidence', 0):.0%})"))
-    bus.subscribe("voice_status", lambda e: _print(f"  [voice] {e['text']}") if e.get("text") else None)
-    _last_state = {"v": ""}
-
-    def _show_state(e):
-        st = e.get("state") or ""
-        if st and st != _last_state["v"] and st in ("listening", "speaking", "idle"):
-            _last_state["v"] = st
-            if st == "listening":
-                _print("  [voice] Listening...")
-            elif st == "idle" and _last_state.get("shown"):
-                pass
-    bus.subscribe("state", _show_state)
-
-    def show_result(e):
-        r = e["result"]
-        if r.spoken:
-            _print(f"Jarvis: {r.spoken}")
-        if r.details and r.details.strip() != r.spoken.strip():
-            _print("   " + r.details.strip().replace("\n", "\n   ")[:4000])
-        for f in r.files_changed:
-            _print(f"   changed: {f}")
-        for d in r.double_check:
-            _print(f"   check: {d}")
-    bus.subscribe("result", show_result)
-
-    def on_approval(e):
-        _print("\n" + "=" * 70 + "\nAPPROVAL NEEDED\n" + e["confirm_text"] + "\n" + "=" * 70)
-        _print("Type: a = approve, d = deny, e <changes> = edit the request")
-    bus.subscribe("approval_request", on_approval)
-
-    tts = None
-    if s.voice.tts_enabled:
-        try:
-            from jarvis.voice.windows_speech import Tts
-
-            tts = Tts(s.voice.tts_voice, s.voice.tts_rate)
-        except Exception as exc:
-            _print(f"(TTS unavailable: {exc})")
-
-    orch.start()
-
-    def handle_async(text: str, source: Source, conf: float = 1.0) -> None:
-        if waiting_question.is_set():          # a spoken answer to Jarvis's question ("Send it to X?")
-            answers.append(text)
-            answer_ready.set()
-            return
-        heard = getattr(listener, "last_language", "") if source == Source.VOICE else ""
-        lang = heard or ("hi" if any(w in f" {text.lower()} " for w in (" karo", " kholo", " batao", " kya ", " hai "))
-                         else "en")
-        req = UserRequest(text=text, source=source, confidence=conf, language=lang)
-        if source == Source.VOICE and conf < 0.6 and not orch.confirm.pending():
-            _print(f"Jarvis: Did you mean \"{text}\"? (low confidence - please type or repeat)")
-            bus.publish("say", text="Sorry, could you repeat that?")
-            return
-        threading.Thread(target=orch.handle, args=(req,), daemon=True).start()
-
-    listener = None
-    if voice and s.voice.enabled and s.voice.wake_engine == "openwakeword":
-        try:
-            import faster_whisper  # noqa: F401  (heavy imports on the main thread, never racing other threads)
-            import openwakeword  # noqa: F401
-
-            from jarvis.voice.listener import AudioListener
-            from jarvis.voice.whisper_stt import WhisperStt
-
-            whisper = WhisperStt(s.voice.whisper_model, languages=tuple(s.voice.languages or ["en"]))
-            whisper.preload_async()
-            listener = AudioListener(lambda t, c: handle_async(t, Source.VOICE, c), whisper,
-                                     wake_threshold=s.voice.wake_threshold, follow_up_s=s.voice.follow_up_window_s,
-                                     max_utterance_s=s.voice.max_utterance_s)
-            listener.barge_in = s.voice.barge_in
-            listener.start()
-            _print("Voice: say 'Hey Jarvis' + your request in one go (or press Ctrl+Alt+Space).")
-        except Exception as exc:
-            _print(f"(openWakeWord voice unavailable: {exc}; using Windows speech)")
-            log.exception("openwakeword listener failed")
-            listener = None
-    if voice and s.voice.enabled and listener is None:
-        try:
-            from jarvis.voice.windows_speech import WindowsListener
-
-            listener = WindowsListener(lambda t, c: handle_async(t, Source.VOICE, c), s.voice.wake_phrases,
-                                       s.voice.stt_language, s.voice.follow_up_window_s, s.voice.max_utterance_s,
-                                       s.voice.wake_confidence)
-            listener.stt_engine = s.voice.stt_engine
-            try:
-                import faster_whisper  # noqa: F401  (heavy import on the main thread, not racing other threads)
-
-                from jarvis.voice.whisper_stt import WhisperStt
-
-                hints =", ".join(sorted({e.name for e in orch.apps.entries})[:60])
-                listener.whisper = WhisperStt(s.voice.whisper_model, hints)
-                listener.whisper.preload_async()     # load model now, not on the first command
-            except ImportError:
-                log.info("faster-whisper not installed; Windows dictation only")
-            listener.start()
-            _print("Voice is starting in the background. Typed commands work now; watch [voice] lines.")
-        except Exception as exc:
-            _print(f"(voice unavailable: {exc})")
-            log.exception("voice failed to start")
-    start_hotkeys(orch.kill_switch, (listener.push_to_talk if listener else lambda: None))
+    rt = JarvisRuntime(config.load(), voice=voice, console=True)
+    rt.start()
 
     _print(f"Logs: {paths.logs_dir() / 'jarvis.jsonl'}")
     _print("Jarvis is running. Type a request, or say 'Hey Jarvis'. Ctrl+Alt+Space = talk now. Ctrl+Alt+K = kill switch. 'quit' to exit.")
@@ -221,43 +80,47 @@ def run(voice: bool) -> int:
                 break
             if not line:
                 continue
-            if waiting_question.is_set():
-                answers.append(line)
-                answer_ready.set()
+            if rt.waiting_for_answer():
+                rt.answer(line)
                 continue
-            pending = orch.confirm.pending()
+            pending = rt.orch.confirm.pending()
             if pending and line.lower()[:1] in ("a", "d", "e") and (len(line) == 1 or line[1] == " "):
                 p = pending[-1]
                 if line.lower().startswith("a"):
-                    orch.confirm.click(p.nonce, "approve")
+                    rt.approve(p.nonce)
                 elif line.lower().startswith("d"):
-                    orch.confirm.click(p.nonce, "deny")
+                    rt.deny(p.nonce)
                 else:
-                    orch.confirm.click(p.nonce, "edit", line[1:].strip())
+                    rt.orch.confirm.click(p.nonce, "edit", line[1:].strip())
                 continue
             if line.lower() in ("quit", "exit"):
                 break
             if line.lower() in ("kill", "stop"):
-                orch.kill_switch()
+                rt.kill()
                 continue
-            handle_async(line, Source.TYPED)
+            rt.submit(line, Source.TYPED)
     except KeyboardInterrupt:
         pass
     finally:
-        orch.kill_switch()
-        orch.shutdown()
+        rt.kill()
+        rt.stop()
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="jarvis")
     ap.add_argument("command", nargs="?", default="run",
-                    choices=["run", "doctor", "set-key", "set-mail", "verify-audit"])
+                    choices=["run", "ui", "doctor", "set-key", "set-mail", "verify-audit"])
     ap.add_argument("--no-voice", action="store_true")
+    ap.add_argument("--minimized", action="store_true", help="ui: start in the tray")
     ap.add_argument("--log-level", default="INFO")
     a = ap.parse_args()
-    logging_setup.setup(a.log_level)
+    logging_setup.setup(a.log_level, console=a.command != "ui")
     paths.ensure_app_dirs()
+    if a.command == "ui":
+        from jarvis.ui.app import run_ui
+
+        return run_ui(minimized=a.minimized, voice=not a.no_voice)
     if a.command == "doctor":
         return doctor()
     if a.command == "set-mail":

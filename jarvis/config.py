@@ -61,6 +61,16 @@ class ModelSettings:
 
 
 @dataclass
+class UiSettings:
+    """Desktop overlay preferences. Missing keys keep these defaults."""
+    enabled: bool = True                 # master switch: off refuses new commands and pauses the mic
+    start_with_windows: bool = False
+    hide_from_capture: bool = False      # SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE
+    overlay_x: int = -1                  # -1 = top-center on next launch
+    overlay_y: int = -1
+
+
+@dataclass
 class Settings:
     backend: str = "auto"                 # auto | sdk | cli
     workspace: str = ""
@@ -92,6 +102,7 @@ class Settings:
     hotkeys: dict[str, str] = field(default_factory=lambda: {
         "palette": "ctrl+alt+j", "push_to_talk": "ctrl+alt+space", "kill": "ctrl+alt+k"})
     language_reply: str = "auto"
+    ui: UiSettings = field(default_factory=UiSettings)
 
     # ------------------------------------------------------------------ helpers
     def workspace_path(self) -> Path:
