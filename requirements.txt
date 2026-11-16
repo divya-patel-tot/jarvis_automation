@@ -21,3 +21,5 @@ winrt-Windows.Globalization
 PySide6
 mcp
 pytest
+faster-whisper
+sounddevice

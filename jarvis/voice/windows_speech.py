@@ -593,8 +593,25 @@ class WindowsListener:
             except Exception:
                 pass
 
+    # Set by __main__: optional local Whisper engine + configured engine name.
+    whisper = None
+    stt_engine = "windows"
+    _windows_dictation_broken = False
+    last_language = ""
+
     async def _capture_command(self, rec, compiled: str, scenario: str, timeout_s: float):
-        """One command listen on a fresh topic-constraint recognizer (not the wake list)."""
+        """One command listen: Whisper (local) when configured or when Windows dictation is
+        broken on this machine, else a fresh WinRT topic-constraint recognizer."""
+        if self.whisper is not None and (self.stt_engine == "whisper" or self._windows_dictation_broken):
+            bus.publish("state", state="listening")
+            bus.publish("voice_status", text="Listening (local Whisper)... speak your request")
+            await self._wait_quiet()
+            loop = asyncio.get_running_loop()
+            text, conf, lang = await loop.run_in_executor(
+                None, self.whisper.listen, max(4.0, timeout_s), self.max_utterance_s)
+            if lang:
+                self.last_language = lang
+            return rec, text, conf, ("success" if text else "timeout"), compiled, scenario
         label = "web-search" if scenario == "web" else "dictation"
         if compiled != "command" or self._grammar != ("command", scenario):
             rec = await self._rebuild(rec, "command", scenario)
@@ -603,6 +620,11 @@ class WindowsListener:
         bus.publish("voice_status", text="Listening... speak your request")
         await self._wait_quiet()
         text, conf, status = await self._listen_once(rec, timeout_s, f"command/{label}")
+        if status == "unknown" and not text and self.whisper is not None:
+            # D-011: WinRT free-form recognition doesn't work for this desktop app -> switch for the session.
+            self._windows_dictation_broken = True
+            log.warning("Windows dictation returned status=unknown; switching command STT to local Whisper")
+            bus.publish("voice_status", text="Switched to local Whisper speech recognition")
         return rec, text, conf, status, compiled, scenario
 
     async def _wait_quiet(self, max_wait_s: float = 30.0, tail_s: float = 0.35) -> None:

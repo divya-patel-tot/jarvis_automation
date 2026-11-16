@@ -35,9 +35,9 @@ class VoiceSettings:
     enabled: bool = True
     wake_phrases: list[str] = field(default_factory=lambda: ["hey jarvis", "ok jarvis", "jarvis"])
     wake_confidence: str = "medium"       # low | medium | high (WinRT confidence)
-    stt_engine: str = "windows"           # windows | whisper
+    stt_engine: str = "whisper"           # whisper (local, reliable, Hindi) | windows (auto-falls back to whisper)
     stt_language: str = "en-US"           # Windows speech language tag (English)
-    whisper_model: str = "small"          # used when stt_engine == whisper
+    whisper_model: str = "base"           # base ~1 s/command on CPU; "small" = better Hindi, slower
     tts_enabled: bool = True
     tts_voice: str = ""                   # substring of an installed SAPI voice name
     tts_rate: int = 1                     # SAPI -10..10

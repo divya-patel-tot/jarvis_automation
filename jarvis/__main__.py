@@ -167,6 +167,15 @@ def run(voice: bool) -> int:
             listener = WindowsListener(lambda t, c: handle_async(t, Source.VOICE, c), s.voice.wake_phrases,
                                        s.voice.stt_language, s.voice.follow_up_window_s, s.voice.max_utterance_s,
                                        s.voice.wake_confidence)
+            listener.stt_engine = s.voice.stt_engine
+            try:
+                from jarvis.voice.whisper_stt import WhisperStt
+
+                hints = ", ".join(sorted({e.name for e in orch.apps.entries})[:60])
+                listener.whisper = WhisperStt(s.voice.whisper_model, hints)
+                listener.whisper.preload_async()     # load model now, not on the first command
+            except ImportError:
+                log.info("faster-whisper not installed; Windows dictation only")
             listener.start()
             _print("Voice is starting in the background. Typed commands work now; watch [voice] lines.")
         except Exception as exc:

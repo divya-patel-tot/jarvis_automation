@@ -408,8 +408,13 @@ class Orchestrator:
                 pctx.tainted = True
                 self.ws.write_policy_state(pctx)    # hook re-reads per call: network now blocked
 
-        with obs:
-            outcome = self.backends.run(spec, on_event)
+        try:
+            with obs:
+                outcome = self.backends.run(spec, on_event)
+        finally:
+            # Never leave an execute/full grant lying around for the next tool call
+            # (e.g. someone opening the workspace in Cursor later): lock back to plan mode.
+            self.ws.write_policy_state(self.ws.policy_context(ctx, Mode.PLAN, autonomy="safe"))
         self._last_blocked = list(obs.blocked)
         self.ledger.record(runs=1, tokens=int(outcome.usage.get("total_tokens", 0) or
                                               outcome.usage.get("input_tokens", 0) + outcome.usage.get("output_tokens", 0)),
