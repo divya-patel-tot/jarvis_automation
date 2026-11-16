@@ -261,6 +261,7 @@ class AudioListener:
                 break
             chunks.append(frame)
             rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+            bus.publish("mic_level", level=round(min(1.0, rms * 25), 3))      # UI waveform (~12/s, capture only)
             elapsed = time.monotonic() - t0
             if rms > thr:
                 heard_new, silent = True, 0.0

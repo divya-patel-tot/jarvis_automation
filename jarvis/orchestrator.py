@@ -133,7 +133,12 @@ class Orchestrator:
         """Entry point (thread-safe; call from any thread). Every turn is saved to history."""
         self._tl.route = None
         self._tl.task_id = ""
+        bus.publish("task", task_id=req.id, status="started", request=req.text, source=req.source.value,
+                    ts=time.time())
         result = self._handle(req, fg_window)
+        bus.publish("task", task_id=req.id, status="finished", request=req.text, source=req.source.value,
+                    result_status=getattr(result, "status", ""), spoken=getattr(result, "spoken", ""),
+                    route=getattr(self._tl.route, "path", ""), ts=time.time())
         try:
             route = self._tl.route
             if req.text.strip() and result is not None and (result.spoken or result.details):
@@ -186,6 +191,7 @@ class Orchestrator:
             self._waiting.append(ticket)
             position = len(self._waiting) - (0 if self.busy.locked() else 1)
         if position > 0:
+            bus.publish("task", task_id=req.id, status="queued", request=req.text, position=position, ts=time.time())
             bus.publish("say", text="Queued. I'll do it right after the current task." if position == 1
                         else f"Queued as number {position}.")
         try:
@@ -294,6 +300,9 @@ class Orchestrator:
             res = actions.ActionResult(False, "That didn't work.", details=str(exc))
         ms = int((time.perf_counter() - t0) * 1000)
         self.audit.write("fast_path", req.id, intent=i, params=p, ok=res.ok, ms=ms, details=res.details)
+        bus.publish("step", task_id=req.id, step_id=f"{req.id}-fast", status="done" if res.ok else "failed",
+                    title=res.spoken.rstrip(".") or i.replace("_", " "), detail=f"instant command, {ms} ms",
+                    icon="bolt", internal=False, ts=time.time())
         return TaskResult("success" if res.ok else "failed", res.spoken, res.details, res.files)
 
     def _clarify_reminder(self, route) -> TaskResult:
@@ -499,7 +508,8 @@ class Orchestrator:
         phase = mode.value
         spec = RunSpec(prompt=prompt, cwd=self.ws.root, mode="plan" if mode == Mode.PLAN else "agent",
                        model=self.backends.model_for(strong), session_key=session, custom_tools=tools)
-        obs = Observer(ctx.task_id, self.audit, self.s.budgets, pctx, self.backends.cancel, self.backends.kill, phase)
+        obs = Observer(ctx.task_id, self.audit, self.s.budgets, pctx, self.backends.cancel, self.backends.kill, phase,
+                       request_id=ctx.request.id)
 
         def on_event(ev):
             obs.on_event(ev)

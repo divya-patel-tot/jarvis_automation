@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -30,8 +31,9 @@ log = logging.getLogger(__name__)
 
 class Observer:
     def __init__(self, task_id: str, audit: AuditLog, limits: BudgetSettings, pctx: policy.PolicyContext,
-                 cancel: Callable[[], None], kill: Callable[[], None], phase: str) -> None:
+                 cancel: Callable[[], None], kill: Callable[[], None], phase: str, request_id: str = "") -> None:
         self.task_id = task_id
+        self.request_id = request_id or task_id
         self.audit = audit
         self.budget = TaskBudget(limits)
         self.pctx = pctx
@@ -64,6 +66,7 @@ class Observer:
                 self.budget.on_tool_call()
                 self._check_tool(ev)
                 bus.publish("activity", task_id=self.task_id, text=ev.summary())
+                self._publish_step(ev, "running")
                 self.audit.write("tool_started", self.task_id, phase=self.phase, tool=ev.tool,
                                  category=ev.category.value, args=ev.args)
             elif ev.kind == AgentEventKind.TOOL_FINISHED:
@@ -80,6 +83,9 @@ class Observer:
                     if "blocked by a hook" in msg.lower() or "jarvis policy" in msg.lower():
                         text = f"Blocked by policy: {ev.tool} {str(ev.args.get('command') or ev.args.get('path') or '')[:100]}"
                 bus.publish("activity", task_id=self.task_id, text=text)
+                blocked = text.startswith("Blocked by policy")
+                held = blocked and policy.DELETE_MARK.lower() in str(ev.result).lower()
+                self._publish_step(ev, "held" if held else "blocked" if blocked else "done" if ev.ok else "failed")
                 self.audit.write("tool_finished", self.task_id, phase=self.phase, tool=ev.tool, ok=ev.ok,
                                  result=str(ev.result)[:2000])
             elif ev.kind == AgentEventKind.TEXT_DELTA:
@@ -95,6 +101,21 @@ class Observer:
         except BudgetExceeded as exc:
             self._stop(f"budget: {exc}")
         self._drain_hook_log()
+
+    def _publish_step(self, ev: AgentEvent, status: str) -> None:
+        """Friendly live step for the UI (see jarvis/steps.py for the payload contract)."""
+        try:
+            from jarvis.steps import describe
+
+            d = describe(ev)
+            if status in ("failed", "blocked") and isinstance(ev.result, dict):
+                err = ev.result.get("error")
+                d["detail"] = str(err.get("message") if isinstance(err, dict) else err or d.get("detail", ""))[:200]
+            bus.publish("step", task_id=self.request_id, step_id=ev.call_id or f"{self.task_id}-{id(ev)}",
+                        status=status, title=d["title"], detail=d.get("detail", ""), icon=d.get("icon", "gear"),
+                        internal=bool(d.get("internal")), ts=time.time())
+        except Exception:
+            log.debug("step publish failed", exc_info=True)
 
     def _check_tool(self, ev: AgentEvent, completed: bool = False) -> None:
         d = policy.check_tool(ev.tool, ev.args, self.pctx, self.pctx.allowed_mcp_tools)
