@@ -86,6 +86,10 @@ class AgentEvent:
         if self.kind in (AgentEventKind.TOOL_STARTED, AgentEventKind.TOOL_FINISHED):
             target = self.args.get("command") or self.args.get("path") or self.args.get("file_path") \
                 or self.args.get("url") or ""
+            if not target and self.tool.lower().startswith("mcp:"):
+                a = self.args
+                target = " ".join(str(x) for x in (a.get("window"), a.get("element"), a.get("keys"),
+                                                    (f'"{a["text"][:60]}"' if a.get("text") else None)) if x)
             verb = "Running" if self.kind == AgentEventKind.TOOL_STARTED else ("Done" if self.ok else "Failed")
             return f"{verb}: {self.tool} {str(target)[:120]}".strip()
         return self.text[:200]

@@ -21,6 +21,10 @@ from jarvis.voice.whisper_stt import clean_transcript, strip_wake
     ("Edge, Jarvis. Can you open Teams?", "Can you open Teams"),     # live log 11:09
     ("A Jarvis, close the notepad", "close the notepad"),
     ("open the jarvis folder in documents", "open the jarvis folder in documents"),   # jarvis later = content
+    ("H-R-Wiz, Open Integrity and give a prompt", "Open Integrity and give a prompt"),  # live 11:31
+    ("Hage-ervis, Open Chrome and Open Gmail inside it.", "Open Chrome and Open Gmail inside it"),
+    ("Open notepad, then type hello", "Open notepad, then type hello"),              # real command, keep
+    ("Yes, send it", "Yes, send it"),
 ])
 def test_strip_wake(heard, command):
     assert strip_wake(heard) == command

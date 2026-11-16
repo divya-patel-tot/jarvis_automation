@@ -282,7 +282,12 @@ class Desktop:
             (ctrl.DoubleClick if double else ctrl.Click)(simulateMove=False)
             how = "mouse double-click" if double else "mouse click"
         time.sleep(0.3)
-        return {"clicked": element_id, "name": ctrl.Name, "method": how}
+        try:
+            name = ctrl.Name
+        except Exception:     # the element went away because the click changed the UI - that's fine
+            name = ""
+        return {"clicked": element_id, "name": name, "method": how,
+                "hint": "UI may have changed - desktop_read again before the next action"}
 
     def type_text(self, text: str, element_id: str = "", replace: bool = False, press_enter: bool = False) -> dict:
         return self._worker.call(self._type, text, element_id, replace, press_enter)
@@ -392,6 +397,28 @@ class Desktop:
 
 
 # --------------------------------------------------------------------------- SDK registration
+ARG_ALIASES = {
+    "window": ("window", "title", "title_pattern", "window_title", "name", "app", "process", "hwnd", "target"),
+    "element": ("element", "element_id", "id", "eid", "ref"),
+    "text": ("text", "value", "message", "content", "string"),
+    "keys": ("keys", "key", "hotkey", "shortcut", "combo"),
+}
+
+
+def normalize_args(a: dict) -> dict:
+    """Models don't always use our exact argument names (live: desktop_focus(title_pattern='Cursor'))."""
+    out = dict(a)
+    for canon, aliases in ARG_ALIASES.items():
+        if canon not in out or out[canon] in (None, ""):
+            for alias in aliases:
+                if out.get(alias) not in (None, ""):
+                    out[canon] = out[alias]
+                    break
+    if isinstance(out.get("element"), str):
+        out["element"] = out["element"].strip("[] ")
+    return out
+
+
 def _obj(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
 
@@ -407,7 +434,10 @@ def build_custom_tools(desktop: Desktop) -> dict:
         def execute(args, _ctx):
             t0 = time.perf_counter()
             try:
-                result = {"ok": True, **fn(dict(args or {}))}
+                result = {"ok": True, **fn(normalize_args(dict(args or {})))}
+            except KeyError as exc:   # the model used an argument name we don't know
+                result = {"ok": False, "error": f"missing argument {exc}. Arguments for {name}: "
+                                                f"{list(specs[name][1]['properties'])}"}
             except DesktopError as exc:
                 result = {"ok": False, "error": str(exc)}
             except Exception as exc:

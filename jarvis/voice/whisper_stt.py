@@ -50,8 +50,22 @@ def strip_wake(text: str) -> str:
         # "open the jarvis folder" -> 'jarvis' is content, not the wake word.
         if len(before) <= 2 and not any(w in COMMAND_WORDS for w in before):
             return text[m.end():].strip(" ,.!?")
-    return WAKE_PREFIX.sub("", text).strip(" ,.!?")
+    stripped = WAKE_PREFIX.sub("", text).strip(" ,.!?")
+    if stripped != text.strip(" ,.!?"):
+        return stripped
+    # Structural rule (no word lists): the wake phrase, however garbled ("H-R-Wiz", "Edge", "Hage-ervis"),
+    # comes out as a short leading clause ended by a comma. Drop it if it has no command words.
+    head, sep, rest = text.partition(",")
+    words = [w.strip(" .!?-").lower() for w in re.split(r"[\s\-]+", head) if w.strip(" .!?-")]
+    if sep and rest.strip() and 1 <= len(words) <= 3 and len(head) <= 22 \
+            and not any(w in COMMAND_WORDS or w in MEANINGFUL_LEADS for w in words):
+        return rest.strip(" ,.!?")
+    return stripped
 
+
+# Leading words that carry meaning (answers, amendments) - never dropped as a garbled wake phrase.
+MEANINGFUL_LEADS = {"yes", "yeah", "yep", "no", "nope", "haan", "han", "ha", "nahi", "na", "sure", "actually",
+                    "wait", "also", "instead", "cancel", "stop", "confirm", "and", "then", "but"}
 
 COMMAND_WORDS = {"open", "close", "start", "launch", "run", "create", "make", "delete", "remove", "show", "find",
                  "search", "send", "play", "write", "read", "copy", "move", "rename", "the", "my", "in", "to", "of",

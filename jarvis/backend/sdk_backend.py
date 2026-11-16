@@ -254,6 +254,11 @@ class SdkBackend(AgentBackend):
             elif mtype == "tool_call":
                 name = getattr(m, "name", "")
                 args = m.args if isinstance(m.args, dict) else {"value": m.args}
+                if name == "mcp" and isinstance(args.get("toolName"), str):
+                    # Custom/MCP tools arrive as name="mcp", args={"toolName", "args", "providerIdentifier"}.
+                    inner = args.get("args")
+                    name = f"MCP:{args['toolName']}"
+                    args = inner if isinstance(inner, dict) else {"value": inner}
                 cat = ToolCategory(tool_category(name))
                 status = getattr(m, "status", "")
                 if status == "running":
